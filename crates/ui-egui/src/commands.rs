@@ -17,6 +17,10 @@ impl PdfCraftApp {
     /// Whether a registered command can run now. The engine judges the document (security,
     /// contents, undo history); view state it can't see is checked here.
     pub(crate) fn command_enabled(&self, spec: &CommandSpec) -> bool {
+        // Undo and Redo act on the Combine files list while its tab shows.
+        if self.combine_showing() && matches!(spec.needs, commands::Needs::Undo | commands::Needs::Redo) {
+            return self.combine_can_undo(spec.needs == commands::Needs::Undo);
+        }
         commands::is_enabled(spec, &self.session, self.active_ids().map(|(_, id)| id))
             && (spec.needs != commands::Needs::TwoPageView || self.active.and_then(|i| self.views.get(i)).is_some_and(crate::DocView::cover_applies))
     }
@@ -76,7 +80,12 @@ impl PdfCraftApp {
         let targets = active.map(|i| self.views[i].target_pages()).unwrap_or_default();
         match id {
             "file.open" => self.open_dialog(),
-            "page.combine" => self.combine_dialog(),
+            "file.open_recent" => match self.recent.first().map(|r| r.path.clone()) {
+                // The palette runs commands without a submenu: open the most recent file.
+                Some(p) => self.open_recent(&p),
+                None => self.notify_tr("No recent files"),
+            },
+            "page.combine" => self.open_combine_tab(),
             "file.save" => {
                 self.save_active(SaveTarget::InPlace);
             }
@@ -467,6 +476,7 @@ impl PdfCraftApp {
             }
             "create.blank" => self.create_blank(),
             "create.file" => self.open_dialog(),
+            "create.multiple" => self.create_multiple_dialog(),
             "create.images" => self.create_from_images_dialog(),
             "create.clipboard" => self.create_from_clipboard(),
             "optimize.reduce" => self.reduce_file_size(),
@@ -547,6 +557,28 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
     for spec in commands::menu(menu) {
         let label = commands::current_label(spec, &app.session, app.active_ids().map(|(_, id)| id));
         let label = crate::i18n::menu_label(spec.id, &label);
+        // Open Recent is a submenu of the live recent list, not one action: disabled while the
+        // list is empty, otherwise each entry opens its file (or focuses the tab showing it).
+        if spec.id == "file.open_recent" {
+            if app.recent.is_empty() {
+                ui.add_enabled(false, egui::Button::new(label));
+                continue;
+            }
+            let mut open: Option<String> = None;
+            ui.menu_button(label, |ui| {
+                for r in &app.recent {
+                    if ui.button(&r.name).on_hover_text(&r.path).clicked() {
+                        open = Some(r.path.clone());
+                        ui.close();
+                    }
+                }
+            });
+            if let Some(p) = open {
+                app.open_recent(&p);
+                ui.close();
+            }
+            continue;
+        }
         let shortcut = spec.shortcut.map(|s| s.label(mac)).unwrap_or_default();
         let enabled = app.command_enabled(spec);
         let resp = ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut));

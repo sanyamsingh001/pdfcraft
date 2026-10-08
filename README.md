@@ -291,6 +291,8 @@ Every engine feature is reachable without the GUI, through one table of JSON-Sch
   { "mcpServers": { "pdfcraft": { "command": "pdfcraft-cli", "args": ["mcp", "--root", "/path/to/your/pdfs"] } } }
   ```
 
+  `--compact` shrinks the tool list the agent has to read: `tools/list` returns about ten core tools plus `tool_search` and `tool_call`, which find and run every other tool, so the list costs far fewer tokens. Every tool still works.
+
   `--root` confines every file the agent can read or write to one directory. Builds that should not include the server at all can use `cargo build -p pdfcraft-cli --no-default-features`.
 
 - **The Rust API** (`pdfcraft_automation::Automation::call`), for embedding.
@@ -417,6 +419,19 @@ The honest assessment by area, what's lacking and where we're going are in **[RO
 | x86 (32-bit) | `pdfcraft-<ver>-windows-x86.msi` | `pdfcraft-<ver>-windows-x86-portable.zip` |
 
 Installers and executables are code-signed.
+
+The portable zip runs from any folder, a USB stick included. Its `portable.txt` keeps the settings,
+logs and crash recovery in a `PdfCraftData` folder next to `pdfcraft.exe`, so nothing is written to
+`%APPDATA%`; delete that file to use the normal per-user folders.
+
+The MSI installs for all users and requires administrator privileges. For unattended deployment
+without a desktop shortcut, run from an elevated terminal:
+
+```powershell
+msiexec /i "pdfcraft-<ver>-windows-x64.msi" /qn /norestart INSTALLDESKTOPSHORTCUT=0
+```
+
+Use the MSI for your architecture. Per-user installation overrides are not supported.
 
 ### macOS
 

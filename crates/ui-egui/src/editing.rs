@@ -2,6 +2,7 @@
 //! "save changes?" prompt when closing a tab or quitting with unsaved edits.
 
 use pdfcraft_engine::Edit;
+use pdfcraft_platform::staging::{StagingName, create_staging, staging_suffixes};
 
 use crate::PdfCraftApp;
 
@@ -36,6 +37,7 @@ impl PdfCraftApp {
                 let Some(doc) = self.session.get(id) else { return true };
                 let info = &doc.info;
                 let view = &mut self.views[i];
+                view.signature_drag.committed(&edit, doc.edit_generation());
                 match comment_page(&edit) {
                     // Comment edits change one page: keep every other raster.
                     Some(page) => view.page_changed(page),
@@ -73,12 +75,21 @@ impl PdfCraftApp {
         }
     }
 
+    /// Undo the last change: to the Combine files list while its tab shows, else the document.
     pub fn undo(&mut self) {
-        self.history_step(true);
+        if self.combine_showing() {
+            self.combine_history_step(true);
+        } else {
+            self.history_step(true);
+        }
     }
 
     pub fn redo(&mut self) {
-        self.history_step(false);
+        if self.combine_showing() {
+            self.combine_history_step(false);
+        } else {
+            self.history_step(false);
+        }
     }
 
     fn history_step(&mut self, undo: bool) {
@@ -112,6 +123,10 @@ impl PdfCraftApp {
         }
         match self.views.get_mut(i).and_then(|v| v.pending_action.take()) {
             Some(crate::canvas::ViewAction::InsertFromFile) => self.insert_from_file_dialog(),
+            Some(crate::canvas::ViewAction::InsertFromFileAt(at)) => self.insert_from_file_at(Some(at)),
+            Some(crate::canvas::ViewAction::Save) => {
+                self.save_active(SaveTarget::InPlace);
+            }
             Some(crate::canvas::ViewAction::Extract) => self.dialog = Some(crate::Dialog::Extract),
             Some(crate::canvas::ViewAction::Split) => self.dialog = Some(crate::Dialog::Split),
             Some(crate::canvas::ViewAction::CopyPages { cut }) => self.copy_pages(cut),
@@ -199,12 +214,29 @@ impl PdfCraftApp {
     /// user has been told why, so the typing isn't lost and the caller can stop.
     fn apply_queued_edit(&mut self, i: usize) -> bool {
         let Some(edit) = self.views.get_mut(i).and_then(|v| v.pending_edit.take()) else { return true };
+        let signature_page = self.views.get_mut(i).and_then(|v| v.fill_signature_page.take());
         let committed = self.views.get_mut(i).and_then(|v| v.forms.committed.take());
         let typed = match (&edit, &committed) {
             (Edit::SetFieldValue { name, .. }, Some(draft)) => *name == draft.name,
             _ => false,
         };
-        if self.apply_edit(edit) || !typed {
+        if self.apply_edit(edit) {
+            if let Some(page) = signature_page
+                && let Some(view) = self.views.get_mut(i)
+            {
+                // Signature imports are a labeled batch; select their appended stamp just
+                // as AddAnnotation selects a typed or drawn signature.
+                let newest = self
+                    .session
+                    .get(view.id)
+                    .and_then(|d| d.info.annotations.iter().filter(|a| a.page == page && a.in_reply_to.is_none()).map(|a| a.index).max());
+                view.comments.selected = newest.map(|index| (page, index));
+                view.comments.reveal = true;
+                self.quick_tool = crate::QuickTool::Select;
+            }
+            return true;
+        }
+        if !typed {
             return true;
         }
         if let (Some(mut draft), Some(view)) = (committed, self.views.get_mut(i)) {
@@ -492,14 +524,23 @@ fn comment_page(edit: &Edit) -> Option<usize> {
 /// Write via a temporary file in the same directory and rename over the target, so a crash or
 /// full disk never leaves a half-written PDF where the original was.
 pub fn write_atomically(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomically_with(path, bytes, staging_suffixes())
+}
+
+/// [`write_atomically`], trying the staging names that `suffixes` give.
+fn write_atomically_with(path: &str, bytes: &[u8], suffixes: impl IntoIterator<Item = u64>) -> std::io::Result<()> {
     use std::io::Write;
     let target = std::path::Path::new(path);
     let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-    let tmp = dir.join(format!(".{}.pdfcraft-{}.tmp", target.file_name().and_then(|n| n.to_str()).unwrap_or("save"), std::process::id()));
+    let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("save");
+    let (tmp, f) = create_staging(dir, name, StagingName::TagThenSuffix, suffixes)?;
     let result = (|| {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
+        // Closed at the end of the block, before the rename.
+        {
+            let mut f = f;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+        }
         std::fs::rename(&tmp, target)
     })();
     if result.is_err() {
@@ -585,4 +626,165 @@ fn bookmark_at<'a>(items: &'a [pdfcraft_render::OutlineItem], path: &[usize]) ->
     let (first, rest) = path.split_first()?;
     let item = items.get(*first)?;
     if rest.is_empty() { Some(item) } else { bookmark_at(&item.children, rest) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{write_atomically, write_atomically_with};
+    use pdfcraft_platform::staging::{STAGING_ATTEMPTS, staging_suffixes};
+    use std::path::{Path, PathBuf};
+
+    /// A fresh, empty folder for one staging test.
+    fn staging_dir(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pdfcraft-ui-staging-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn staged(dir: &Path, suffix: u64) -> PathBuf {
+        dir.join(format!(".out.pdf.pdfcraft-{suffix:016x}.tmp"))
+    }
+
+    fn read(p: &Path) -> String {
+        std::fs::read_to_string(p).unwrap()
+    }
+
+    /// A symbolic link to a file, where the system allows one (Windows needs Developer Mode or an
+    /// administrator for it).
+    fn file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(std::io::Error::other(format!("no symbolic links here: {} {}", target.display(), link.display())))
+        }
+    }
+
+    #[test]
+    fn saving_never_writes_through_a_file_planted_at_the_staging_name() {
+        let dir = staging_dir("planted");
+        let outside = dir.join("outside.txt");
+        std::fs::write(&outside, "PRECIOUS").unwrap();
+        let target = dir.join("out.pdf");
+        let path = target.to_string_lossy().into_owned();
+        // A hard link needs no privileges on any system, and writing to it writes to `outside`.
+        std::fs::hard_link(&outside, staged(&dir, 1)).unwrap();
+        std::fs::write(staged(&dir, 2), "PLANTED").unwrap();
+        write_atomically_with(&path, b"NEW", [1, 2, 3]).unwrap();
+        assert_eq!(read(&target), "NEW");
+        assert_eq!(read(&outside), "PRECIOUS");
+        assert_eq!(read(&staged(&dir, 1)), "PRECIOUS");
+        assert_eq!(read(&staged(&dir, 2)), "PLANTED");
+        assert!(!staged(&dir, 3).exists(), "the staging file was renamed into place");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_never_writes_through_a_symbolic_link_at_the_staging_name() {
+        let dir = staging_dir("symlink");
+        let outside = dir.join("outside.txt");
+        std::fs::write(&outside, "PRECIOUS").unwrap();
+        let target = dir.join("out.pdf");
+        if let Err(e) = file_symlink(&outside, &staged(&dir, 1)) {
+            eprintln!("symbolic links not checked: {e}");
+            return;
+        }
+        write_atomically_with(&target.to_string_lossy(), b"NEW", [1, 2]).unwrap();
+        assert_eq!(read(&target), "NEW");
+        assert_eq!(read(&outside), "PRECIOUS");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_never_creates_a_file_through_a_dangling_link_at_the_staging_name() {
+        let dir = staging_dir("dangling");
+        let unborn = dir.join("created-through-a-link.txt");
+        let target = dir.join("out.pdf");
+        if let Err(e) = file_symlink(&unborn, &staged(&dir, 1)) {
+            eprintln!("symbolic links not checked: {e}");
+            return;
+        }
+        write_atomically_with(&target.to_string_lossy(), b"NEW", [1, 2]).unwrap();
+        assert_eq!(read(&target), "NEW");
+        assert!(!unborn.exists(), "nothing was created through the dangling link");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_at_the_staging_name_is_left_alone() {
+        let dir = staging_dir("folder");
+        std::fs::create_dir(staged(&dir, 1)).unwrap();
+        std::fs::write(staged(&dir, 1).join("inside.txt"), "PLANTED").unwrap();
+        let target = dir.join("out.pdf");
+        write_atomically_with(&target.to_string_lossy(), b"NEW", [1, 2]).unwrap();
+        assert_eq!(read(&target), "NEW");
+        assert_eq!(read(&staged(&dir, 1).join("inside.txt")), "PLANTED");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_gives_up_rather_than_reuse_a_taken_name() {
+        let dir = staging_dir("taken");
+        let target = dir.join("out.pdf");
+        std::fs::write(&target, "OLD").unwrap();
+        for s in 1..=STAGING_ATTEMPTS as u64 {
+            std::fs::write(staged(&dir, s), "PLANTED").unwrap();
+        }
+        assert!(write_atomically_with(&target.to_string_lossy(), b"NEW", 1..).is_err());
+        assert_eq!(read(&target), "OLD");
+        for s in 1..=STAGING_ATTEMPTS as u64 {
+            assert_eq!(read(&staged(&dir, s)), "PLANTED");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The names in a folder: what a test can see was left behind.
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn saving_a_long_name_leaves_only_the_saved_file() {
+        assert_ne!(staging_suffixes().next(), staging_suffixes().next(), "each save draws new names");
+        // 60 four-byte characters: a 244-byte name, within every system's limit. Its staging name
+        // must be too (on Linux the whole name in it would be 275 bytes).
+        let dir = staging_dir("clean");
+        let name = format!("{}.pdf", "\u{1F600}".repeat(60));
+        let path = dir.join(&name).to_string_lossy().into_owned();
+        write_atomically(&path, b"NEW").unwrap();
+        write_atomically(&path, b"NEWER").unwrap();
+        assert_eq!(read(&dir.join(&name)), "NEWER");
+        assert_eq!(listing(&dir), [name], "no staging file is left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows refuses to replace a read-only file, so the rename fails: the staging file must not
+    /// be left behind.
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_save_removes_the_staging_file() {
+        let dir = staging_dir("readonly");
+        let target = dir.join("out.pdf");
+        std::fs::write(&target, "OLD").unwrap();
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&target, perms.clone()).unwrap();
+        let e = write_atomically_with(&target.to_string_lossy(), b"NEW", [7]).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "the rename failed: {e}");
+        assert_eq!(read(&target), "OLD");
+        assert_eq!(listing(&dir), ["out.pdf"], "the staging file was removed");
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&target, perms).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

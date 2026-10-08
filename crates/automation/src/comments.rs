@@ -7,7 +7,7 @@ use pdfcraft_engine::{Edit, Markup, NOTE_SIZE, NewAnnotation, NoteIcon, ReviewSt
 use pdfcraft_render::{Annotation, PageInfo};
 use serde_json::{Value, json};
 
-use crate::{Args, Automation, Result, ToolError, failed};
+use crate::{Args, Automation, Content, DEFAULT_DPI, MAX_DPI, Result, ToolError, encode_png, failed};
 
 /// Author used when a tool call names none.
 pub(crate) const DEFAULT_AUTHOR: &str = "PdfCraft";
@@ -86,6 +86,34 @@ impl Args<'_> {
 }
 
 impl Automation {
+    /// One of the read-only layers the GUI uses to drag/resize an embedded image signature.
+    pub(crate) fn comment_image_preview(&self, a: &Args) -> Result<Vec<Content>> {
+        let (page, index) = self.comment_target(a)?;
+        let dpi = a.opt_num("dpi")?.unwrap_or(DEFAULT_DPI);
+        if !(1.0..=MAX_DPI).contains(&dpi) {
+            return Err(ToolError::InvalidArgs(format!("dpi must be between 1 and {MAX_DPI}")));
+        }
+        let doc = self.doc(a)?;
+        let preview = doc.image_signature_preview(page, index).map_err(failed)?.ok_or_else(|| failed("choose an image signature or initials"))?;
+        let annotation = doc.info.annotations.iter().find(|c| c.page == page && c.index == index).ok_or_else(|| failed("no such comment"))?;
+        let info = doc.info.pages.get(page).ok_or_else(|| failed("no such page"))?;
+        let [w, h] = preview.image.size();
+        let layer = a.opt_str("layer")?.unwrap_or("background");
+        let image = match layer {
+            "image" => Content::Png { data: preview.image.bytes().as_ref().clone(), width: w as u32, height: h as u32 },
+            "background" => {
+                let out = preview.render_background((dpi / 72.0) as f32).map_err(failed)?;
+                Content::Png { data: encode_png(out.width, out.height, &out.rgba)?, width: out.width, height: out.height }
+            }
+            _ => return Err(ToolError::InvalidArgs("layer must be background or image".into())),
+        };
+        Ok(vec![
+            Content::Json(json!({ "page": page + 1, "index": index + 1, "rect": rect_to_view(info, annotation.rect), "rotation": info.rotation,
+                "layer": layer, "opacity": preview.opacity, "dpi": dpi })),
+            image,
+        ])
+    }
+
     /// Comments of a document, optionally only of one 0-based page.
     fn comments(&self, a: &Args) -> Result<Vec<Annotation>> {
         let doc = self.doc(a)?;
@@ -350,13 +378,24 @@ impl Automation {
         let [x, y] = a.need::<2>("at", "Fill & Sign")?;
         let at = to_user(&info, x, y);
         let author = a.opt_str("author")?.unwrap_or(DEFAULT_AUTHOR).to_string();
+        let kind = a.str("type")?;
+        if let Some(path) = a.opt_str("path")? {
+            if !matches!(kind, "signature" | "initials") || a.opt_str("text")?.is_some() {
+                return Err(ToolError::InvalidArgs("path is only for an image signature or initials; pass either path or text".into()));
+            }
+            let path = self.resolve(path, false)?;
+            let file = std::fs::File::open(&path).map_err(|e| failed(format!("{}: {e}", path.display())))?;
+            let image = pdfcraft_engine::SignatureImage::read(file).map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+            let edit = image.edit(page, at, kind == "initials", &author).ok_or_else(|| ToolError::InvalidArgs("at must be finite".into()))?;
+            return self.apply(a, edit);
+        }
         let size = 10.0;
         let text_at = |t: &str| {
             let w = (pdfcraft_engine::annot_text::text_width(t, size) + 8.0).clamp(20.0, 600.0);
             let h = size * 1.2 + 6.0;
             Shape::Typewriter { rect: [at[0], at[1] - h, at[0] + w, at[1]], font_size: size }
         };
-        let (shape, contents) = match a.str("type")? {
+        let (shape, contents) = match kind {
             "text" => {
                 let t = a.str("text")?.to_string();
                 (text_at(&t), t)

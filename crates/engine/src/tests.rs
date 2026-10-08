@@ -297,6 +297,46 @@ fn combine_extract_split_and_insert_from_file() {
     assert!(matches!(bad, Err(EditError::Source(_))));
 }
 
+/// A minimal baseline JPEG (headers only; the data is embedded as is).
+fn jpeg_bytes() -> Vec<u8> {
+    let mut v = vec![0xFF, 0xD8];
+    v.extend_from_slice(&[0xFF, 0xE0, 0, 16, b'J', b'F', b'I', b'F', 0, 1, 1, 1, 0x01, 0x2C, 0x01, 0x2C, 0, 0]);
+    v.extend_from_slice(&[0xFF, 0xC0, 0, 17, 8, 0, 2, 0, 3, 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1]);
+    v.extend_from_slice(&[0xFF, 0xD9]);
+    v
+}
+
+#[test]
+fn mixed_files_convert_and_combine_in_order() {
+    let mut s = Session::new();
+    let pdf = Arc::new(fixture(2));
+    let (kind, same) = s.convert_to_pdf("a.pdf", &pdf).unwrap();
+    assert_eq!(kind, SourceKind::Pdf);
+    assert!(Arc::ptr_eq(&same, &pdf), "a PDF is passed through untouched");
+    let (kind, image) = s.convert_to_pdf("scan.jpg", &Arc::new(jpeg_bytes())).unwrap();
+    assert_eq!(kind, SourceKind::Image);
+    let (kind, text) = s.convert_to_pdf("notes.txt", &Arc::new(b"hello".to_vec())).unwrap();
+    assert_eq!(kind, SourceKind::Text);
+    let combined = s.combine_ranges(&[("notes".into(), text, None), ("a".into(), pdf, Some("2".into())), ("scan".into(), image, None)]).unwrap();
+    let id = s.open_new("Combined.pdf", combined).unwrap();
+    assert_eq!(page_texts(&s, id), ["hello", "Page 2", ""]);
+    assert_eq!(outline_titles(&s.get(id).unwrap().info.outline), ["notes→1", "a→2", "scan→3"]);
+}
+
+#[test]
+fn files_that_cannot_be_converted_are_refused_clearly() {
+    let s = Session::new();
+    let err = s.convert_to_pdf("report.docx", &Arc::new(b"PK\x03\x04".to_vec())).unwrap_err();
+    assert_eq!(err, EditError::Source("report.docx: this file type can't be converted; use a PDF, an image or a .txt file".into()));
+    assert!(matches!(s.convert_to_pdf("empty", &Arc::new(Vec::new())), Err(EditError::Source(_))));
+    // Damaged inputs of a known type fail with an error, not a panic.
+    assert!(s.convert_to_pdf("bad.png", &Arc::new(b"\x89PNG\r\n\x1a\nnope".to_vec())).is_err());
+    assert!(s.convert_to_pdf("bad.jpg", &Arc::new(vec![0xFF, 0xD8, 0xFF])).is_err());
+    assert!(s.convert_to_pdf("bad.pdf", &Arc::new(b"%PDF-1.7 nope".to_vec())).is_err());
+    let err = s.convert_to_pdf("locked.pdf", &protected("pw", "o", -1)).unwrap_err();
+    assert_eq!(err, EditError::Source("locked.pdf: it is password-protected".into()));
+}
+
 fn protected(user: &str, owner: &str, permissions: i32) -> Arc<Vec<u8>> {
     let mut doc = pdfcraft_cos::Document::open(Arc::new(fixture(2))).unwrap();
     doc.set_encryption(&pdfcraft_cos::NewEncryption {
@@ -632,6 +672,38 @@ fn permissions_password_restricts_others_but_not_this_session() {
 }
 
 #[test]
+fn combine_source_check_says_why_a_file_cannot_be_combined() {
+    let (mut s, id) = session_with(1);
+    let plain = s.get(id).unwrap().bytes.clone();
+    assert_eq!(crate::combine_source_check(&plain, None), Ok(()));
+    // Page assembly withheld (Changes::None) without a password to open it.
+    let p = Protection { changes: Changes::None, ..protection(None, Some("boss")) };
+    s.apply(id, Edit::Protect(p)).unwrap();
+    let locked = s.save_bytes(id).unwrap();
+    assert_eq!(crate::combine_source_check(&locked, None), Err(crate::SourceProblem::NotPermitted));
+    let (mut s, id) = session_with(1);
+    s.apply(id, Edit::Protect(protection(Some("pw"), Some("owner")))).unwrap();
+    let secret = s.save_bytes(id).unwrap();
+    assert_eq!(crate::combine_source_check(&secret, None), Err(crate::SourceProblem::Password));
+    assert_eq!(crate::combine_source_check(&secret, Some("nope")), Err(crate::SourceProblem::WrongPassword));
+    // Its open password reads it, but its permissions withhold assembling pages: the owner's
+    // password allows it.
+    assert_eq!(crate::combine_source_check(&secret, Some("pw")), Err(crate::SourceProblem::NotPermitted));
+    assert_eq!(crate::combine_source_check(&secret, Some("owner")), Ok(()));
+    // The permissions password lifts the restriction on copying pages.
+    assert_eq!(crate::combine_source_check(&locked, Some("boss")), Ok(()));
+    // Combining with the passwords: the result opens without any.
+    let s = Session::new();
+    let sources = vec![("secret".to_string(), secret, None), ("locked".to_string(), locked, None)];
+    assert!(s.combine_ranges(&sources).is_err(), "no passwords, no combining");
+    let out = s.combine_unlocked(&sources, &[Some("owner"), Some("boss")]).unwrap();
+    let combined = pdfcraft_cos::Document::open(out).unwrap();
+    assert!(combined.permissions().is_none(), "the combined file is not encrypted");
+    assert_eq!(pdfcraft_organize::page_count(&combined).unwrap(), 2);
+    assert!(matches!(crate::combine_source_check(&Arc::new(b"not a pdf".to_vec()), None), Err(crate::SourceProblem::Unreadable(_))));
+}
+
+#[test]
 fn protection_is_validated_undoable_and_never_logged() {
     let (mut s, id) = session_with(1);
     assert!(matches!(s.apply(id, Edit::Protect(protection(None, None))), Err(EditError::Protection(_))));
@@ -913,6 +985,39 @@ fn create_and_reduce() {
     let mut s3 = Session::new();
     let r = s3.open("r.pdf", None, reduced, None).unwrap();
     assert_eq!(page_texts(&s3, r), ["Page 1", "Page 1"]);
+}
+
+#[test]
+fn an_optimize_job_reports_its_stages_and_can_be_cancelled() {
+    use crate::optimizer::OptimizeStage;
+    let (s, id) = session_with(2);
+    let settings = optimize::Settings::default();
+    let mut stages = Vec::new();
+    let (bytes, _) = s
+        .optimize_job(id, &settings, &[])
+        .unwrap()
+        .run(|st| {
+            stages.push(st);
+            true
+        })
+        .unwrap();
+    assert!(bytes.starts_with(b"%PDF-"));
+    assert_eq!(stages.first(), Some(&OptimizeStage::Discarding));
+    assert_eq!(&stages[stages.len() - 3..], [OptimizeStage::CleaningUp, OptimizeStage::Merging, OptimizeStage::Writing]);
+    let fractions: Vec<f32> = stages.iter().map(|st| st.fraction()).collect();
+    assert!(fractions.windows(2).all(|w| w[0] <= w[1]), "the bar never goes back: {fractions:?}");
+    assert!(fractions.iter().all(|f| (0.0..=1.0).contains(f)));
+    assert_eq!(
+        OptimizeStage::Images { done: 0, total: 0 }.fraction(),
+        OptimizeStage::Images { done: 5, total: 5 }.fraction(),
+        "no images: no division by zero"
+    );
+
+    // Cancelled at the merge: nothing is written, the open document is untouched.
+    let before = s.get(id).unwrap().bytes.clone();
+    let r = s.optimize_job(id, &settings, &[]).unwrap().run(|st| st != OptimizeStage::Merging);
+    assert!(matches!(r, Err(EditError::Cancelled)), "{r:?}");
+    assert_eq!(s.get(id).unwrap().bytes, before);
 }
 
 #[test]
