@@ -286,6 +286,10 @@ pub struct PageClip {
 /// Files delivered asynchronously: (name, bytes).
 pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 
+/// Files that failed to arrive asynchronously (a browser `?file=` URL that couldn't be fetched):
+/// `(name, error)`, reported to the user on the next frame (#173).
+pub type FailedInbox = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
 /// A request the operating system sends the running app, outside its window: on macOS, Finder
 /// double-clicks, Open With and drops on the Dock icon arrive as Apple events, not arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -357,6 +361,8 @@ pub struct PdfCraftApp {
     pub full_screen: bool,
     /// Files delivered asynchronously (web drag-and-drop, web file picker).
     pub inbox: Inbox,
+    /// Asynchronous opens that failed (web `?file=` fetches), shown as a notice.
+    pub failed_inbox: FailedInbox,
     /// Requests from the operating system, polled every frame (macOS Apple events).
     pub os_events: Option<OsEventsFn>,
     /// A pending "save changes?" question (closing a dirty tab or quitting).
@@ -414,8 +420,8 @@ pub struct PdfCraftApp {
     pub a11y: a11y_ui::A11yState,
     pub a11y_skipped: std::collections::BTreeSet<pdfcraft_engine::a11y::Rule>,
     pub alt_draft: a11y_ui::AltDraft,
-    /// List the macOS Keychain's signing identities among the digital IDs (the desktop app).
-    pub keychain_ids: bool,
+    /// List the OS key store's signing identities among the digital IDs (the desktop app).
+    pub os_key_store_ids: bool,
     pub cert_viewer: Option<sign_ui::CertViewer>,
     /// The last space audit.
     pub space_audit: Vec<pdfcraft_engine::optimize::SpaceUse>,
@@ -580,6 +586,7 @@ impl PdfCraftApp {
             password_prompt: None,
             full_screen: false,
             inbox: Default::default(),
+            failed_inbox: Default::default(),
             os_events: None,
             close_request: None,
             save_override: None,
@@ -615,7 +622,7 @@ impl PdfCraftApp {
             a11y: a11y_ui::A11yState::default(),
             a11y_skipped: Default::default(),
             alt_draft: Default::default(),
-            keychain_ids: false,
+            os_key_store_ids: false,
             cert_viewer: None,
             space_audit: Vec::new(),
             combine_draft: Vec::new(),
@@ -1058,8 +1065,8 @@ impl PdfCraftApp {
             "signature": match &self.signature { Some(fill_sign::SavedSig::Drawn(s)) => Some(s), _ => None },
             "signature_text": match &self.signature { Some(fill_sign::SavedSig::Typed(t)) => Some(t), _ => None },
             "initials": self.initials,
-            // Keychain identities are read from macOS each time.
-            "digital_ids": self.digital_ids.iter().filter(|e| !e.path.starts_with("keychain:")).collect::<Vec<_>>(),
+            // macOS Keychain and Windows store identities are read from their OS key stores each time.
+            "digital_ids": self.digital_ids.iter().filter(|e| !e.path.starts_with("keychain:") && !e.path.starts_with("windows:")).collect::<Vec<_>>(),
             "trusted": trusted,
             "custom_stamps": stamps_ui::encode(&self.custom_stamps),
             "javascript": self.session.javascript(),
@@ -1449,6 +1456,10 @@ impl eframe::App for PdfCraftApp {
             if let Err(e) = self.open_bytes(&name, None, bytes) {
                 self.notify_fmt("Couldn't open {name}: {e}", &[("name", &name), ("e", &e.to_string())]);
             }
+        }
+        let failed: Vec<(String, String)> = self.failed_inbox.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+        for (name, e) in failed {
+            self.notify_fmt("Couldn't open {name}: {e}", &[("name", &name), ("e", &e)]);
         }
         let os_events = self.os_events.as_mut().map(|poll| poll()).unwrap_or_default();
         for e in os_events {
