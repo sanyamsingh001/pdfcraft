@@ -62,6 +62,24 @@
 	Name on new comments	新注释的作者姓名
 	Open…	打开…
 	Open Recent	打开最近的文件
+	Pin folder to Home…	将文件夹固定到主页…
+	Folders	文件夹
+	Pin a folder…	固定文件夹…
+	Pin a folder to Home	将文件夹固定到主页
+	Pin a folder to list its newest PDFs here, such as where your scanner or a synced cloud drive saves them.	固定一个文件夹，即可在此列出其中最新的 PDF，例如扫描仪或同步云盘保存文件的位置。
+	Unpin	取消固定
+	Unpin {folder}	取消固定 {folder}
+	Looking for PDFs…	正在查找 PDF…
+	This folder isn't available right now. It may have moved, or its drive or cloud sync is offline.	此文件夹当前不可用。它可能已被移动，或其所在驱动器或云同步处于离线状态。
+	No PDFs in this folder yet	此文件夹中还没有 PDF
+	Show less	收起
+	Show {n} more	再显示 {n} 个
+	The newest {n} of {total} PDFs	共 {total} 个 PDF 中最新的 {n} 个
+	Pinned folders need the desktop app	固定文件夹需要桌面版应用
+	Choose a folder on this computer to pin	请选择此电脑上要固定的文件夹
+	{folder} is already pinned to Home	{folder} 已固定到主页
+	You can pin up to {n} folders. Unpin one first.	最多可固定 {n} 个文件夹。请先取消固定一个。
+	Pinned {folder} to Home	已将 {folder} 固定到主页
 	No recent files	没有最近的文件
 	Open	打开
 	Open file	打开文件
@@ -1459,6 +1477,15 @@
 	Created 1 link	已创建 1 个链接
 	Created {n} links	已创建{n}个链接
 	Text recognition is already running	文本识别已在运行
+	Optimizing… removing user data	正在优化…删除用户数据
+	Optimizing… image {d} of {t}	正在优化…第{d}张图像，共{t}张
+	Optimizing… cleaning up	正在优化…清理
+	Optimizing… merging identical objects	正在优化…合并相同对象
+	Optimizing… writing the copy	正在优化…写入副本
+	Cancelling…	正在取消…
+	Optimization is already running	优化已在运行
+	Optimization cancelled	已取消优化
+	Couldn't optimize the file	无法优化文件
 	Recognizing text… file {d} of {t}	正在识别文本…第{d}个文件，共{t}个
 	Recognizing text… page {d} of {t}	正在识别文本…第{d}页，共{t}页
 	Recognized 1 word	识别了 1 个单词
