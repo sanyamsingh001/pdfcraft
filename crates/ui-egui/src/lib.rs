@@ -1032,6 +1032,7 @@ impl PdfCraftApp {
         self.session.close(id);
         self.active = match self.active {
             _ if self.views.is_empty() => None,
+            Some(a) if a > index => Some(a - 1),
             Some(a) if a >= self.views.len() => Some(self.views.len() - 1),
             other => other,
         };
