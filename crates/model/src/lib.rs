@@ -39,17 +39,27 @@ impl Page {
         self.dict.get(b"Rotate").and_then(|o| doc.resolve(o).as_int()).unwrap_or(0).rem_euclid(360) / 90 * 90
     }
 
+    /// The local user-space unit in multiples of 1/72 inch (not inherited).
+    pub fn user_unit(&self, doc: &Document) -> f64 {
+        // Match the bootstrap renderer's f32 unit, including underflow/default handling.
+        let unit = self.dict.get(b"UserUnit").and_then(|o| doc.resolve(o).as_f64()).unwrap_or(1.0) as f32;
+        if unit.is_finite() && unit > 0.0 && unit <= 75_000.0 { unit as f64 } else { 1.0 }
+    }
+
     /// The displayed size (width, height) in points.
     pub fn display_size(&self, doc: &Document) -> (f64, f64) {
         let c = self.crop(doc);
-        let (w, h) = (c[2] - c[0], c[3] - c[1]);
+        let unit = self.user_unit(doc);
+        let (w, h) = ((c[2] - c[0]) * unit, (c[3] - c[1]) * unit);
         if self.rotation(doc) % 180 == 0 { (w, h) } else { (h, w) }
     }
 
     /// The matrix `[a b c d e f]` from display space (origin at the bottom-left of the page as
-    /// shown, y up, after `/Rotate`) to user space.
+    /// shown, y up, after `/Rotate` and `/UserUnit`) to raw user space.
     pub fn view_matrix(&self, doc: &Document) -> [f64; 6] {
-        view_matrix_for(self.rotation(doc), self.crop(doc))
+        let [a, b, c, d, e, f] = view_matrix_for(self.rotation(doc), self.crop(doc));
+        let scale = 1.0 / self.user_unit(doc);
+        [a * scale, b * scale, c * scale, d * scale, e, f]
     }
 }
 
@@ -164,6 +174,38 @@ mod tests {
                 _ => [210.0, 320.0],
             };
             assert_eq!(tl, expect, "rotation {rotate}");
+        }
+    }
+    #[test]
+    fn user_unit_scales_display_size_and_inverse_mapping_without_changing_raw_crop() {
+        for rotation in [0, 90, 180, 270] {
+            let d = doc(rotation);
+            let base = pages(&d).remove(0);
+            for unit in [0.5, 1.0, 2.0] {
+                let mut p = base.clone();
+                p.dict.set(b"UserUnit".to_vec(), Object::Real(unit));
+                assert_eq!(p.crop(&d), [10.0, 20.0, 210.0, 320.0]);
+                let expected = if rotation % 180 == 0 { (200.0 * unit, 300.0 * unit) } else { (300.0 * unit, 200.0 * unit) };
+                assert_eq!(p.display_size(&d), expected);
+                let (w, h) = expected;
+                for (x, y) in [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)] {
+                    let raw = apply(p.view_matrix(&d), x, y);
+                    assert!([10.0, 210.0].contains(&raw[0]) && [20.0, 320.0].contains(&raw[1]));
+                }
+                let expected_top_left = match rotation {
+                    0 => [10.0, 320.0],
+                    90 => [10.0, 20.0],
+                    180 => [210.0, 20.0],
+                    _ => [210.0, 320.0],
+                };
+                assert_eq!(apply(p.view_matrix(&d), 0.0, h), expected_top_left);
+            }
+            for invalid in [0.0, -1.0, 75_001.0] {
+                let mut p = base.clone();
+                p.dict.set(b"UserUnit".to_vec(), Object::Real(invalid));
+                assert_eq!(p.user_unit(&d), 1.0);
+                assert_eq!(p.display_size(&d), base.display_size(&d));
+            }
         }
     }
 }

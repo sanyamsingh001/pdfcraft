@@ -337,8 +337,23 @@ impl<'a> Page<'a> {
     /// Return the with and height of the page that should be assumed when rendering the page.
     ///
     /// Depending on the document, it is either based on the media box or the crop box
-    /// of the page. In addition to that, it also takes the rotation of the page into account.
+    /// of the page, after rotation and the local UserUnit, in physical 1/72-inch points.
     pub fn render_dimensions(&self) -> (f32, f32) {
+        // PdfCraft patch: physical display points include the page-local UserUnit.
+        let (w, h) = self.rotated_dimensions();
+        let unit = self.user_unit();
+        (w * unit, h * unit)
+    }
+
+    /// The page-local user-space unit in multiples of 1/72 inch (supported: >0 to 75000).
+    pub fn user_unit(&self) -> f32 {
+        // UserUnit is not inheritable; malformed values keep the default unit.
+        self.inner.get::<f32>(USER_UNIT)
+            .filter(|u| u.is_finite() && *u > 0.0 && *u <= 75_000.0)
+            .unwrap_or(1.0)
+    }
+
+    fn rotated_dimensions(&self) -> (f32, f32) {
         let (mut base_width, mut base_height) = self.base_dimensions();
 
         if matches!(
@@ -375,11 +390,11 @@ impl<'a> Page<'a> {
     ///
     /// This accounts for the mismatch between PDF's y-up and most renderers'
     /// y-down coordinate system, the rotation of the page and the offset of
-    /// the crop box.
+    /// the crop box, and the page-local UserUnit scale.
     pub fn initial_transform(&self, invert_y: bool) -> Transform {
         let crop_box = self.intersected_crop_box();
         let (_, base_height) = self.base_dimensions();
-        let (width, height) = self.render_dimensions();
+        let (width, height) = self.rotated_dimensions();
 
         let horizontal_t = Transform::ROTATE_CW_90 * Transform::translate((0.0, -width as f64));
         let flipped_horizontal_t =
@@ -412,7 +427,9 @@ impl<'a> Page<'a> {
             Transform::IDENTITY
         };
 
-        rotation_transform
+        // PdfCraft patch: scale the completed raw crop/rotation mapping exactly once.
+        Transform::scale(self.user_unit() as f64)
+            * rotation_transform
             * inversion_transform
             * Transform::translate((-crop_box.x0, -crop_box.y0))
     }

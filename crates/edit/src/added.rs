@@ -13,7 +13,7 @@ use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use pdfcraft_fonts::{GlyphError, GlyphOutline, ShapedCluster, arabic_glyph, helvetica_width, literal, shape_arabic, win_ansi};
 use unicode_bidi::{Level, ParagraphBidiInfo};
 
-use crate::{EditError, check, contents, n, page_list, place_tagged};
+use crate::{EditError, check, contents, matrix_number, n, page_list, place_tagged};
 
 const TAG: &str = "Added";
 
@@ -441,7 +441,16 @@ fn draw_arabic(doc: &mut Document, t: &AddedText, latin: &str, taken: &Dict, fon
         for piece in pieces {
             match piece {
                 Piece::Latin(s) => {
-                    out.extend(format!("/{latin} {} Tf {} Tw 1 0 0 1 {} {} Tm ", n(t.size), n(tw), n(pen), n(y)).bytes());
+                    out.extend(
+                        format!(
+                            "/{latin} {} Tf {} Tw 1 0 0 1 {} {} Tm ",
+                            matrix_number(t.size),
+                            matrix_number(tw),
+                            matrix_number(pen),
+                            matrix_number(y)
+                        )
+                        .bytes(),
+                    );
                     out.extend(literal(&win_ansi(s)));
                     out.extend_from_slice(b" Tj\n");
                     current = Some(latin);
@@ -454,10 +463,10 @@ fn draw_arabic(doc: &mut Document, t: &AddedText, latin: &str, taken: &Dict, fon
                         // Codes start at 1; k % 240 + 1 is at most 240.
                         let code = u8::try_from(k % GLYPHS_PER_FONT + 1).unwrap_or(1);
                         if current != Some(name.as_str()) {
-                            out.extend(format!("/{name} {} Tf ", n(t.size)).bytes());
+                            out.extend(format!("/{name} {} Tf ", matrix_number(t.size)).bytes());
                             current = Some(name.as_str());
                         }
-                        out.extend(format!("1 0 0 1 {} {} Tm ", n(pen), n(y)).bytes());
+                        out.extend(format!("1 0 0 1 {} {} Tm ", matrix_number(pen), matrix_number(y)).bytes());
                         out.extend(literal(&[code]));
                         out.extend_from_slice(b" Tj\n");
                         pen += c.advance * t.size + if c.text == " " { tw } else { 0.0 };
@@ -561,7 +570,16 @@ fn type3_arabic(doc: &mut Document, clusters: &[&ShapedCluster], outlines: &Hash
 /// keeps drawing its Arabic as `?`, as before Arabic was supported, rather than refusing to move it.
 fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing: bool) -> Result<(Vec<u8>, Dict), EditError> {
     let mut res = Dict::new();
-    let mut out = format!("q {} {} {} {} {} {} cm\n", n(view[0]), n(view[1]), n(view[2]), n(view[3]), n(view[4]), n(view[5])).into_bytes();
+    let mut out = format!(
+        "q {} {} {} {} {} {} cm\n",
+        matrix_number(view[0]),
+        matrix_number(view[1]),
+        matrix_number(view[2]),
+        matrix_number(view[3]),
+        matrix_number(view[4]),
+        matrix_number(view[5])
+    )
+    .into_bytes();
     match c {
         Content::Text(t) => {
             let base = t.family.base_font(t.bold, t.italic);
@@ -584,7 +602,7 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
             res.set(b"Font".to_vec(), Object::Dict(fonts));
             let r = text_rect(t);
             let [cr, cg, cb] = t.color.map(|v| v.clamp(0.0, 1.0));
-            out.extend(format!("BT /{name} {} Tf {} {} {} rg\n", n(t.size), n(cr), n(cg), n(cb)).bytes());
+            out.extend(format!("BT /{name} {} Tf {} {} {} rg\n", matrix_number(t.size), n(cr), n(cg), n(cb)).bytes());
             for (i, line) in lines(t).iter().enumerate() {
                 let w = t.family.width(line, t.size, t.bold);
                 let x = match t.align {
@@ -599,7 +617,7 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
                 let spaces = line.matches(' ').count();
                 let tw =
                     if t.align == Align::Justify && i + 1 < all.len() && spaces > 0 { ((r[2] - r[0]) - w).max(0.0) / spaces as f64 } else { 0.0 };
-                out.extend(format!("1 0 0 1 {} {} Tm {} Tw ", n(x), n(y), n(tw)).bytes());
+                out.extend(format!("1 0 0 1 {} {} Tm {} Tw ", matrix_number(x), matrix_number(y), matrix_number(tw)).bytes());
                 out.extend(literal(&win_ansi(line)));
                 out.extend_from_slice(b" Tj\n");
             }
@@ -619,16 +637,16 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
             out.extend(
                 format!(
                     "{} {} {} {} re W n {} {} {} {} {} {} cm /{name} Do\n",
-                    n(r[0]),
-                    n(r[1]),
-                    n(r[2] - r[0]),
-                    n(r[3] - r[1]),
-                    n(a),
-                    n(b),
-                    n(c),
-                    n(d),
-                    n(e),
-                    n(f)
+                    matrix_number(r[0]),
+                    matrix_number(r[1]),
+                    matrix_number(r[2] - r[0]),
+                    matrix_number(r[3] - r[1]),
+                    matrix_number(a),
+                    matrix_number(b),
+                    matrix_number(c),
+                    matrix_number(d),
+                    matrix_number(e),
+                    matrix_number(f)
                 )
                 .bytes(),
             );
@@ -638,8 +656,9 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
     Ok((out, res))
 }
 
-fn params(c: &Content) -> Dict {
+fn params(c: &Content, unit: f64) -> Dict {
     let mut d = Dict::new();
+    d.set(b"UserUnit".to_vec(), Object::Real(unit));
     let arr = |v: &[f64]| Object::Array(v.iter().map(|x| Object::Real(*x)).collect());
     match c {
         Content::Text(t) => {
@@ -680,9 +699,14 @@ fn params(c: &Content) -> Dict {
     d
 }
 
-fn parse(doc: &Document, d: &Dict) -> Option<Content> {
+fn parse(doc: &Document, d: &Dict, current_unit: f64) -> Option<Content> {
+    // Older writers stored raw display units; new writers record their physical-point scale.
+    let stored_unit = d.get(b"UserUnit").and_then(|o| doc.resolve(o).as_f64()).unwrap_or(1.0) as f32;
+    let stored_unit = if stored_unit.is_finite() && stored_unit > 0.0 && stored_unit <= 75_000.0 { stored_unit as f64 } else { 1.0 };
+    let ratio = current_unit / stored_unit;
     let r = nums(doc, d.get(b"Rect"));
     let rect: [f64; 4] = r.try_into().ok()?;
+    let rect = rect.map(|v| v * ratio);
     match d.name(b"Kind")? {
         b"Text" => {
             let (family, bold, italic) = Family::from_base(d.name(b"Font").unwrap_or(b"Helvetica"));
@@ -693,7 +717,7 @@ fn parse(doc: &Document, d: &Dict) -> Option<Content> {
                 family,
                 bold,
                 italic,
-                size: d.get(b"Size").and_then(Object::as_f64).unwrap_or(12.0),
+                size: d.get(b"Size").and_then(Object::as_f64).unwrap_or(12.0) * ratio,
                 color: if c.len() == 3 { [c[0], c[1], c[2]] } else { [0.0; 3] },
                 align: match d.int(b"Align") {
                     Some(1) => Align::Center,
@@ -718,21 +742,58 @@ fn parse(doc: &Document, d: &Dict) -> Option<Content> {
     }
 }
 
-fn validate(c: &Content) -> Result<(), EditError> {
+// Translation can change a subtracted extent by a few ulps. Compare dimensions only, so
+// large coordinates never widen the exception for a genuinely resized item.
+fn preserved_extent(value: f64, previous: f64) -> bool {
+    value.is_finite() && value > 0.0 && previous.is_finite() && previous > 0.0 && (value - previous).abs() <= value.max(previous) * 1e-12
+}
+
+fn validate(c: &Content, previous: Option<&Content>) -> Result<(), EditError> {
     let r = c.rect();
     if !r.iter().all(|v| v.is_finite()) {
         return Err(EditError::Invalid("invalid position".into()));
     }
+    let width = (r[2] - r[0]).abs();
+    let old_rect = previous.map(Content::rect);
+    let kept_width = old_rect.is_some_and(|old| preserved_extent(width, (old[2] - old[0]).abs()));
     match c {
         Content::Text(t) => {
             if t.text.trim().is_empty() {
                 return Err(EditError::Invalid("type some text first".into()));
             }
-            if !(t.size.is_finite() && (1.0..=500.0).contains(&t.size)) {
+            let kept_size = matches!(previous, Some(Content::Text(old)) if t.size == old.size);
+            if !(t.size.is_finite() && t.size > 0.0 && ((1.0..=500.0).contains(&t.size) || kept_size)) {
                 return Err(EditError::Invalid("the font size must be between 1 and 500 points".into()));
             }
-            if (r[2] - r[0]).abs() < 1.0 {
+            if !width.is_finite() || width <= 0.0 || (width < 1.0 && !kept_width) {
                 return Err(EditError::Invalid("the text box is too narrow".into()));
+            }
+            // Preserving a stored size must not admit overflowing layout. Preflight before
+            // draw() can add Arabic font objects or write page resources.
+            let rect = text_rect(t);
+            if !rect.iter().all(|v| v.is_finite()) {
+                return Err(EditError::Invalid("invalid text geometry".into()));
+            }
+            let lines = wrapped(t);
+            let shaped = t.text.chars().any(is_arabic) && pdfcraft_fonts::document_arabic_font().is_some();
+            for (i, (line, rtl)) in lines.iter().enumerate() {
+                let w = if shaped { arabic_width(t, line, *rtl) } else { t.family.width(line, t.size, t.bold) };
+                let spaces = line.matches(' ').count();
+                let tw = if t.align == Align::Justify && i + 1 < lines.len() && spaces > 0 {
+                    ((rect[2] - rect[0]) - w).max(0.0) / spaces as f64
+                } else {
+                    0.0
+                };
+                let x = match t.align {
+                    Align::Justify if shaped && *rtl => rect[2] - w - tw * spaces as f64,
+                    Align::Left | Align::Justify => rect[0],
+                    Align::Center => rect[0] + ((rect[2] - rect[0]) - w) / 2.0,
+                    Align::Right => rect[2] - w,
+                };
+                let y = rect[3] - (i as f64 * 1.2 + 0.95) * t.size;
+                if ![w, x, y, tw, x + w + tw * spaces as f64].iter().all(|v| v.is_finite()) {
+                    return Err(EditError::Invalid("invalid text geometry".into()));
+                }
             }
             // Without the Arabic face, `draw` decides for the Arabic letters themselves (#403): a new
             // item is refused with what's missing, and one that already holds Arabic stays movable.
@@ -747,7 +808,15 @@ fn validate(c: &Content) -> Result<(), EditError> {
             }
         }
         Content::Image(_) => {
-            if (r[2] - r[0]).abs() < 1.0 || (r[3] - r[1]).abs() < 1.0 {
+            let height = (r[3] - r[1]).abs();
+            let kept_height = old_rect.is_some_and(|old| preserved_extent(height, (old[3] - old[1]).abs()));
+            if !width.is_finite()
+                || !height.is_finite()
+                || width <= 0.0
+                || height <= 0.0
+                || (width < 1.0 && !kept_width)
+                || (height < 1.0 && !kept_height)
+            {
                 return Err(EditError::Invalid("the image is too small".into()));
             }
         }
@@ -756,8 +825,9 @@ fn validate(c: &Content) -> Result<(), EditError> {
 }
 
 /// Write an item's stream (new, or replacing `obj`) and make its resources available to the page.
-fn write(doc: &mut Document, page: usize, c: &Content, obj: Option<ObjRef>) -> Result<ObjRef, EditError> {
-    validate(c)?;
+fn write(doc: &mut Document, page: usize, c: &Content, previous: Option<&Added>) -> Result<ObjRef, EditError> {
+    validate(c, previous.map(|a| &a.content))?;
+    let obj = previous.map(|a| a.obj);
     let all = page_list(doc);
     check(&[page], all.len())?;
     let p = &all[page];
@@ -780,7 +850,7 @@ fn write(doc: &mut Document, page: usize, c: &Content, obj: Option<ObjRef>) -> R
     doc.update_dict(p.obj, |d| d.set(b"Resources".to_vec(), Object::Dict(pres)))?;
     let mut sd = Dict::new();
     sd.set(b"PCMark".to_vec(), Object::name(TAG));
-    sd.set(b"PCAdded".to_vec(), Object::Dict(params(c)));
+    sd.set(b"PCAdded".to_vec(), Object::Dict(params(c, p.user_unit(doc))));
     let stream = Stream::flate(sd, &content);
     match obj {
         Some(r) => {
@@ -817,7 +887,9 @@ pub fn list_added(doc: &Document) -> Vec<Added> {
             if d.name(b"PCMark") != Some(TAG.as_bytes()) {
                 continue;
             }
-            if let Some(c) = d.get(b"PCAdded").and_then(|p| doc.resolve(p).as_dict().cloned()).and_then(|p| parse(doc, &p)) {
+            if let Some(c) =
+                d.get(b"PCAdded").and_then(|p| doc.resolve(p).as_dict().cloned()).and_then(|metadata| parse(doc, &metadata, p.user_unit(doc)))
+            {
                 out.push(Added { page: pi, obj: r, content: c });
             }
         }
@@ -845,7 +917,7 @@ pub fn update_content(doc: &mut Document, page: usize, index: usize, c: &Content
     if std::mem::discriminant(&a.content) != std::mem::discriminant(c) {
         return Err(EditError::Invalid("an item can't change between text and image".into()));
     }
-    write(doc, page, c, Some(a.obj))?;
+    write(doc, page, c, Some(&a))?;
     Ok(())
 }
 

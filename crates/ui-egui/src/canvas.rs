@@ -3512,7 +3512,14 @@ trailer << /Root 1 0 R >>
     fn view(pages: usize, layout: PageLayout) -> DocView {
         let info = pdfcraft_render::DocInfo {
             pages: (0..pages)
-                .map(|_| pdfcraft_render::PageInfo { width: 300.0, height: 400.0, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation: 0 })
+                .map(|_| pdfcraft_render::PageInfo {
+                    width: 300.0,
+                    height: 400.0,
+                    user_unit: 1.0,
+                    label: String::new(),
+                    crop: [0.0, 0.0, 300.0, 400.0],
+                    rotation: 0,
+                })
                 .collect(),
             ..Default::default()
         };
@@ -3528,7 +3535,14 @@ trailer << /Root 1 0 R >>
                         1 => (200.0, 4000.0),
                         _ => (4000.0, 200.0),
                     };
-                    pdfcraft_render::PageInfo { width, height, label: (i + 1).to_string(), crop: [0.0, 0.0, width, height], rotation: 0 }
+                    pdfcraft_render::PageInfo {
+                        width,
+                        height,
+                        user_unit: 1.0,
+                        label: (i + 1).to_string(),
+                        crop: [0.0, 0.0, width, height],
+                        rotation: 0,
+                    }
                 })
                 .collect(),
             ..Default::default()
@@ -3907,8 +3921,14 @@ trailer << /Root 1 0 R >>
 
     #[test]
     fn fit_page_and_height_hold_still_while_mixed_page_sizes_scroll_past() {
-        let page =
-            |width: f32, height: f32| pdfcraft_render::PageInfo { width, height, label: String::new(), crop: [0.0, 0.0, width, height], rotation: 0 };
+        let page = |width: f32, height: f32| pdfcraft_render::PageInfo {
+            width,
+            height,
+            user_unit: 1.0,
+            label: String::new(),
+            crop: [0.0, 0.0, width, height],
+            rotation: 0,
+        };
         let info = DocInfo { pages: vec![page(300.0, 400.0), page(600.0, 800.0)], ..Default::default() };
         for fit in [Fit::Page, Fit::Height] {
             let mut v = DocView::new(DocId(1), &info, ViewDefaults::default());
@@ -3944,7 +3964,14 @@ trailer << /Root 1 0 R >>
     fn destinations_set_the_zoom_mode_and_the_point_to_show() {
         let info = pdfcraft_render::DocInfo {
             pages: (0..3)
-                .map(|_| pdfcraft_render::PageInfo { width: 300.0, height: 400.0, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation: 0 })
+                .map(|_| pdfcraft_render::PageInfo {
+                    width: 300.0,
+                    height: 400.0,
+                    user_unit: 1.0,
+                    label: String::new(),
+                    crop: [0.0, 0.0, 300.0, 400.0],
+                    rotation: 0,
+                })
                 .collect(),
             ..Default::default()
         };

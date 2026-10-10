@@ -171,18 +171,81 @@ fn measurement_csv_quotes_newlines_and_blocks_formula_cells() {
 
 #[test]
 fn coordinates_roundtrip_for_crop_rotation_and_user_unit() {
-    for rotation in [0, 90, 180, 270] {
-        let d = fixture("", &format!("/UserUnit 2 /Rotate {rotation} /CropBox [10 20 210 320]"), &[]);
-        for view in [[0.0, 0.0], [37.125, 81.375], [123.0, 175.0]] {
-            let user = view_to_user(&d, 0, view).unwrap();
-            let actual = user_to_view(&d, 0, user).unwrap();
-            close(actual[0], view[0]);
-            close(actual[1], view[1]);
+    for (unit, indirect) in [(0.5, false), (1.0, false), (2.0, false), (0.1, false), (2.0, true)] {
+        // The renderer/model deliberately normalize local units through f32.
+        let normalized = f64::from(unit as f32);
+        for rotation in [0, 90, 180, 270] {
+            let mut d = fixture("", &format!("/UserUnit {unit} /Rotate {rotation} /CropBox [10 20 210 320]"), &[]);
+            if indirect {
+                let reference = d.add(Object::Real(unit));
+                let p = crate::page(&d, 0).unwrap();
+                d.update_dict(p.obj, |page| page.set(b"UserUnit".to_vec(), Object::Ref(reference))).unwrap();
+            }
+            let top_left = match rotation {
+                90 => [10.0, 20.0],
+                180 => [210.0, 20.0],
+                270 => [210.0, 320.0],
+                _ => [10.0, 320.0],
+            };
+            let actual = view_to_user(&d, 0, [0.0, 0.0]).unwrap();
+            close(actual[0], top_left[0]);
+            close(actual[1], top_left[1]);
+            let expected = match rotation {
+                90 => [10.0 + 20.0 / normalized, 20.0 + 10.0 / normalized],
+                180 => [210.0 - 10.0 / normalized, 20.0 + 20.0 / normalized],
+                270 => [210.0 - 20.0 / normalized, 320.0 - 10.0 / normalized],
+                _ => [10.0 + 10.0 / normalized, 320.0 - 20.0 / normalized],
+            };
+            let actual = view_to_user(&d, 0, [10.0, 20.0]).unwrap();
+            close(actual[0], expected[0]);
+            close(actual[1], expected[1]);
+            let view = user_to_view(&d, 0, expected).unwrap();
+            close(view[0], 10.0);
+            close(view[1], 20.0);
+            for view in [[0.0, 0.0], [37.125, 81.375], [123.0, 175.0]] {
+                let user = view_to_user(&d, 0, view).unwrap();
+                let actual = user_to_view(&d, 0, user).unwrap();
+                close(actual[0], view[0]);
+                close(actual[1], view[1]);
+            }
+            let a = view_to_user(&d, 0, [10.0, 20.0]).unwrap();
+            let b = view_to_user(&d, 0, [70.0, 100.0]).unwrap();
+            let scale = scale_at(&d, 0, a).unwrap();
+            assert_eq!(scale.x, normalized / 72.0);
+            assert_eq!(scale.y, normalized / 72.0);
+            close(reading(Kind::Distance, &[a, b], &scale).unwrap().value, 100.0 / 72.0);
         }
-        let a = view_to_user(&d, 0, [10.0, 20.0]).unwrap();
-        let b = view_to_user(&d, 0, [70.0, 100.0]).unwrap();
-        let scale = scale_at(&d, 0, a).unwrap();
-        close(reading(Kind::Distance, &[a, b], &scale).unwrap().value, 100.0 / 72.0);
+    }
+}
+
+#[test]
+fn measurement_units_validate_numeric_values_and_keep_defaults_and_viewport_precedence() {
+    for unit in [0.0, -1.0, f64::NAN, f64::INFINITY, 75000.1] {
+        for indirect in [false, true] {
+            let mut d = fixture("", "/CropBox [10 20 210 320]", &[]);
+            let value = if indirect { Object::Ref(d.add(Object::Real(unit))) } else { Object::Real(unit) };
+            let p = crate::page(&d, 0).unwrap();
+            d.update_dict(p.obj, |page| page.set(b"UserUnit".to_vec(), value)).unwrap();
+            assert!(view_to_user(&d, 0, [10.0, 20.0]).is_err(), "unit={unit}, indirect={indirect}");
+            assert!(user_to_view(&d, 0, [10.0, 20.0]).is_err(), "unit={unit}, indirect={indirect}");
+            assert!(scale_at(&d, 0, [25.0, 35.0]).is_err(), "unit={unit}, indirect={indirect}");
+            let calibrated = Scale::new(3.0, "m", 2).unwrap();
+            set_scale(&mut d, 0, [20.0, 30.0, 50.0, 60.0], "detail", &calibrated).unwrap();
+            assert_eq!(scale_at(&d, 0, [25.0, 35.0]).unwrap(), calibrated);
+        }
+    }
+    for value in [None, Some(Object::name("NotNumeric")), Some(Object::Real(1e-300))] {
+        let mut d = fixture("", "/CropBox [10 20 210 320]", &[]);
+        if let Some(value) = value {
+            let p = crate::page(&d, 0).unwrap();
+            d.update_dict(p.obj, |page| page.set(b"UserUnit".to_vec(), value)).unwrap();
+        }
+        // Missing/non-numeric defaults and accepted f32 underflow agree with the model.
+        assert_eq!(crate::page(&d, 0).unwrap().user_unit(&d), 1.0);
+        assert_eq!(view_to_user(&d, 0, [10.0, 20.0]).unwrap(), [20.0, 300.0]);
+        assert_eq!(user_to_view(&d, 0, [20.0, 300.0]).unwrap(), [10.0, 20.0]);
+        assert_eq!(scale_at(&d, 0, [20.0, 300.0]).unwrap().x, 1.0 / 72.0);
+        assert_eq!(scale_at(&d, 0, [20.0, 300.0]).unwrap().y, 1.0 / 72.0);
     }
 }
 

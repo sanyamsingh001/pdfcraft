@@ -1574,3 +1574,442 @@ fn hostile_form_xobjects_are_read_once() {
     assert_eq!(texts, ["once", "from b", "from a", "inherited", "bad matrix"]);
     assert!(images::reading_images(&doc, 0).unwrap().is_empty());
 }
+
+#[test]
+fn page_marks_and_added_content_preserve_fractional_user_unit_matrices() {
+    for rotation in [0, 90] {
+        let mut doc = fixture();
+        let page = pdfcraft_model::pages(&doc)[2].obj;
+        doc.update_dict(page, |d| {
+            let bounds = Object::Array([0.0, 0.0, 0.1, 0.1].into_iter().map(Object::Real).collect());
+            d.set(b"MediaBox".to_vec(), bounds.clone());
+            d.set(b"CropBox".to_vec(), bounds);
+            d.set(b"UserUnit".to_vec(), Object::Int(4096));
+            d.set(b"Rotate".to_vec(), Object::Int(rotation));
+        })
+        .unwrap();
+        let mut hf = HeaderFooter::default();
+        hf.text[0] = "Matrix header".into();
+        add_header_footer(&mut doc, &[2], &hf, false, &cx()).unwrap();
+        let text = AddedText { rect: [72.0, 100.0, 200.0, 144.0], text: "Matrix text".into(), size: 12.0, ..AddedText::default() };
+        add_content(&mut doc, 2, &Content::Text(text)).unwrap();
+        let saved = reopen(&doc);
+        let contents = streams(&saved, 2);
+        for marker in ["/PCMark /HeaderFooter", "(Matrix text) Tj"] {
+            let matching: Vec<_> = contents.iter().filter(|s| s.contains(marker)).collect();
+            assert_eq!(matching.len(), 1, "{contents:?}");
+            let stream = matching[0];
+            let parsed = pdfcraft_content::parse(stream.as_bytes());
+            assert_eq!(parsed.skipped, 0);
+            let cm = parsed.ops.iter().find(|op| op.is("cm")).unwrap();
+            assert_eq!(cm.operands.len(), 6);
+            assert!(!stream[cm.span.clone()].contains('e') && !stream[cm.span.clone()].contains('E'), "PDF numbers cannot use exponents");
+            let matrix = cm.nums::<6>().unwrap();
+            let expected = if rotation == 0 {
+                [0.000244140625, 0.0, 0.0, 0.000244140625, 0.0, 0.0]
+            } else {
+                [0.0, 0.000244140625, -0.000244140625, 0.0, 0.1, 0.0]
+            };
+            assert_eq!(matrix, expected, "rotation={rotation}, stream={stream}");
+            // A fixed physical display point must remain at its intended raw page position.
+            let raw = [matrix[0] * 72.0 + matrix[2] * 144.0 + matrix[4], matrix[1] * 72.0 + matrix[3] * 144.0 + matrix[5]];
+            let expected_raw = if rotation == 0 { [0.017578125, 0.03515625] } else { [0.06484375, 0.017578125] };
+            for (actual, expected) in raw.into_iter().zip(expected_raw) {
+                assert!((actual - expected).abs() < 1e-12);
+            }
+        }
+    }
+}
+
+#[test]
+fn legacy_added_items_match_painted_physical_geometry_after_text_only_update() {
+    let paint = |doc: &Document, obj, size: f64, baseline: [f64; 2], text: &str| {
+        let object = doc.get(obj);
+        let Object::Stream(stream) = &*object else { panic!("added text stream") };
+        let bytes = stream.decoded().unwrap();
+        let parsed = pdfcraft_content::parse(&bytes);
+        assert_eq!(parsed.skipped, 0);
+        let matrix = parsed.ops.iter().find(|op| op.is("cm")).unwrap().nums::<6>().unwrap();
+        let tm = parsed.ops.iter().find(|op| op.is("Tm")).unwrap().nums::<6>().unwrap();
+        let font = parsed.ops.iter().find(|op| op.is("Tf")).unwrap().num(1).unwrap();
+        assert_eq!(2.0 * matrix[0] * font, size, "actual physical painted font size");
+        let actual = [2.0 * (matrix[0] * tm[4] + matrix[2] * tm[5] + matrix[4]), 2.0 * (matrix[1] * tm[4] + matrix[3] * tm[5] + matrix[5])];
+        for (actual, expected) in actual.into_iter().zip(baseline) {
+            assert!((actual - expected).abs() < 1e-9, "painted baseline: {actual} != {expected}");
+        }
+        assert!(String::from_utf8(bytes).unwrap().contains(&format!("({text}) Tj")));
+    };
+    for legacy in [false, true] {
+        let mut doc = fixture();
+        let page = pdfcraft_model::pages(&doc)[2].obj;
+        doc.update_dict(page, |d| {
+            d.set(b"MediaBox".to_vec(), Object::Array([0.0, 0.0, 300.0, 400.0].into_iter().map(Object::Real).collect()));
+            d.set(b"UserUnit".to_vec(), Object::Int(if legacy { 1 } else { 2 }));
+        })
+        .unwrap();
+        let text = AddedText { rect: [72.0, 100.0, 200.0, 144.0], text: "Matrix text".into(), size: 12.0, ..AddedText::default() };
+        add_content(&mut doc, 2, &Content::Text(text)).unwrap();
+        if legacy {
+            // Reconstruct the old writer shape: identity paint matrix and unmarked raw metadata.
+            // This is original fixture construction, not execution of an old product binary.
+            let obj = list_added(&doc)[0].obj;
+            let Object::Stream(mut stream) = (*doc.get(obj)).clone() else { panic!("added text stream") };
+            let mut metadata = stream.dict.get(b"PCAdded").unwrap().as_dict().unwrap().clone();
+            metadata.remove(b"UserUnit");
+            assert!(!metadata.contains(b"UserUnit"));
+            stream.dict.set(b"PCAdded".to_vec(), Object::Dict(metadata));
+            doc.set(obj, Object::Stream(stream));
+            doc.update_dict(page, |d| d.set(b"UserUnit".to_vec(), Object::Int(2))).unwrap();
+        }
+        let mut saved = reopen(&doc);
+        let size = if legacy { 24.0 } else { 12.0 };
+        let rect = if legacy { [144.0, 259.2, 400.0, 288.0] } else { [72.0, 129.6, 200.0, 144.0] };
+        let baseline = if legacy { [144.0, 265.2] } else { [72.0, 132.6] };
+        let items = list_added(&saved);
+        assert_eq!(items.len(), 1);
+        paint(&saved, items[0].obj, size, baseline, "Matrix text");
+        let Content::Text(mut text) = items[0].content.clone() else { panic!("added text") };
+        assert_eq!(text.size, size, "listed size must agree with actual legacy/new paint");
+        for (actual, expected) in text.rect.into_iter().zip(rect) {
+            assert!((actual - expected).abs() < 1e-9, "selection rectangle: {actual} != {expected}");
+        }
+        // Helvetica x and s have the same advance; change only the text, keeping its placement.
+        text.text = "Matrix test".into();
+        update_content(&mut saved, 2, 0, &Content::Text(text)).unwrap();
+        let reopened = reopen(&saved);
+        let items = list_added(&reopened);
+        assert_eq!(items.len(), 1);
+        let Content::Text(text) = &items[0].content else { panic!("added text") };
+        assert_eq!((text.text.as_str(), text.size), ("Matrix test", size));
+        for (actual, expected) in text.rect.into_iter().zip(rect) {
+            assert!((actual - expected).abs() < 1e-9);
+        }
+        paint(&reopened, items[0].obj, size, baseline, "Matrix test");
+    }
+}
+
+#[test]
+fn solid_background_preserves_subpoint_user_unit_extent_after_save() {
+    let mut doc = fixture();
+    let page = pdfcraft_model::pages(&doc)[2].obj;
+    doc.update_dict(page, |d| {
+        d.set(b"MediaBox".to_vec(), Object::Array([0.0, 0.0, 200.0, 300.0].into_iter().map(Object::Real).collect()));
+        d.set(b"UserUnit".to_vec(), Object::Real(1e-6));
+    })
+    .unwrap();
+    add_background(&mut doc, &[2], &Background::default(), false).unwrap();
+    let saved = reopen(&doc);
+    let contents = streams(&saved, 2);
+    let matching: Vec<_> = contents.iter().filter(|s| s.contains("/PCMark /Background")).collect();
+    assert_eq!(matching.len(), 1);
+    let parsed = pdfcraft_content::parse(matching[0].as_bytes());
+    assert_eq!(parsed.skipped, 0);
+    let matrix = parsed.ops.iter().find(|op| op.is("cm")).unwrap().nums::<6>().unwrap();
+    let rect = parsed.ops.iter().find(|op| op.is("re")).unwrap().nums::<4>().unwrap();
+    assert!(rect[2] > 0.0 && rect[3] > 0.0, "saved background must have nonzero physical extent: {rect:?}");
+    let unit = f64::from(1e-6_f32);
+    for (actual, expected) in rect.into_iter().zip([0.0, 0.0, 200.0 * unit, 300.0 * unit]) {
+        assert!((actual - expected).abs() <= expected.abs() * 1e-12, "physical fill extent: {actual} != {expected}");
+    }
+    for (point, expected) in [([rect[0], rect[1]], [0.0, 0.0]), ([rect[0] + rect[2], rect[1] + rect[3]], [200.0, 300.0])] {
+        let raw = [matrix[0] * point[0] + matrix[2] * point[1] + matrix[4], matrix[1] * point[0] + matrix[3] * point[1] + matrix[5]];
+        for (actual, expected) in raw.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-9, "painted raw fill extent: {actual} != {expected}");
+        }
+    }
+}
+
+#[test]
+fn picture_marks_preserve_subpoint_user_unit_placement_after_save() {
+    for image in [false, true] {
+        for watermark in [false, true] {
+            let mut doc = image_page();
+            let page = pdfcraft_model::pages(&doc)[0].obj;
+            doc.update_dict(page, |d| {
+                d.set(b"MediaBox".to_vec(), Object::Array([0.0, 0.0, 200.0, 300.0].into_iter().map(Object::Real).collect()));
+                d.set(b"UserUnit".to_vec(), Object::Real(1e-6));
+                d.remove(b"Contents");
+            })
+            .unwrap();
+            let source = if image {
+                let resources = doc.resolve(pdfcraft_model::pages(&doc)[0].dict.get(b"Resources").unwrap());
+                let objects = doc.resolve(resources.as_dict().unwrap().get(b"XObject").unwrap());
+                MarkSource { xobject: objects.as_dict().unwrap().reference(b"Im0").unwrap(), size: (4.0, 2.0), image: true }
+            } else {
+                let mut form = pdfcraft_cos::Dict::new();
+                form.set(b"Type".to_vec(), Object::name("XObject"));
+                form.set(b"Subtype".to_vec(), Object::name("Form"));
+                form.set(b"BBox".to_vec(), Object::Array([0.0, 0.0, 200.0, 300.0].into_iter().map(Object::Real).collect()));
+                form.set(b"Resources".to_vec(), Object::Dict(pdfcraft_cos::Dict::new()));
+                let xobject = doc.add(Object::Stream(pdfcraft_cos::Stream::flate(form, b"0 0 200 300 re f\n")));
+                MarkSource { xobject, size: (200.0, 300.0), image: false }
+            };
+            if watermark {
+                add_watermark(&mut doc, &[0], &Watermark { source: Some(source), scale: 1.0, rotation: 0.0, ..Watermark::default() }, false).unwrap();
+            } else {
+                add_background(&mut doc, &[0], &Background { source: Some(source), ..Background::default() }, false).unwrap();
+            }
+            let saved = reopen(&doc);
+            let contents = streams(&saved, 0);
+            let marker = if watermark { "/PCMark /Watermark" } else { "/PCMark /Background" };
+            let matching: Vec<_> = contents.iter().filter(|s| s.contains(marker)).collect();
+            assert_eq!(matching.len(), 1);
+            let parsed = pdfcraft_content::parse(matching[0].as_bytes());
+            assert_eq!(parsed.skipped, 0);
+            let matrices: Vec<_> = parsed.ops.iter().filter(|op| op.is("cm")).map(|op| op.nums::<6>().unwrap()).collect();
+            assert_eq!(matrices.len(), 3);
+            assert_eq!(parsed.ops.iter().filter(|op| op.is("Do")).count(), 1);
+            let top_right = if image { [1.0, 1.0] } else { [200.0, 300.0] };
+            let painted: Vec<_> = [[0.0, 0.0], top_right]
+                .into_iter()
+                .map(|mut point| {
+                    for m in matrices.iter().rev() {
+                        point = [m[0] * point[0] + m[2] * point[1] + m[4], m[1] * point[0] + m[3] * point[1] + m[5]];
+                    }
+                    point
+                })
+                .collect();
+            assert!(painted[1][0] > painted[0][0] && painted[1][1] > painted[0][1], "saved fitted picture must remain nonzero: {painted:?}");
+            let expected = if image { [[0.0, 100.0], [200.0, 200.0]] } else { [[0.0, 0.0], [200.0, 300.0]] };
+            for (point, expected) in painted.into_iter().zip(expected) {
+                for (actual, expected) in point.into_iter().zip(expected) {
+                    assert!((actual - expected).abs() < 1e-9, "image={image}, watermark={watermark}: {actual} != {expected}");
+                }
+            }
+        }
+    }
+}
+
+// Reconstruct original writer metadata/paint at unit 1, then give the page its physical scale.
+fn legacy_added_dimension_fixture(unit: f64) -> Document {
+    legacy_added_dimension_fixture_with_rect(unit, [0.3, 5.0, 40.3, 20.0])
+}
+
+fn legacy_added_dimension_fixture_with_rect(unit: f64, rect: [f64; 4]) -> Document {
+    let mut doc = fixture();
+    add_content(&mut doc, 2, &Content::Text(AddedText { rect, text: "xs".into(), ..AddedText::default() })).unwrap();
+    let mut image = Dict::new();
+    image.set(b"Subtype".to_vec(), Object::name("Image"));
+    image.set(b"Width".to_vec(), Object::Int(1));
+    image.set(b"Height".to_vec(), Object::Int(1));
+    image.set(b"ColorSpace".to_vec(), Object::name("DeviceGray"));
+    image.set(b"BitsPerComponent".to_vec(), Object::Int(8));
+    let image = doc.add(Object::Stream(Stream::from_raw(image, vec![128])));
+    add_content(&mut doc, 2, &Content::Image(AddedImage::new(rect, image))).unwrap();
+    for item in list_added(&doc) {
+        let Object::Stream(mut stream) = (*doc.get(item.obj)).clone() else { panic!("added stream") };
+        let mut metadata = stream.dict.get(b"PCAdded").unwrap().as_dict().unwrap().clone();
+        metadata.remove(b"UserUnit");
+        stream.dict.set(b"PCAdded".to_vec(), Object::Dict(metadata));
+        doc.set(item.obj, Object::Stream(stream));
+    }
+    let page = pdfcraft_model::pages(&doc)[2].obj;
+    doc.update_dict(page, |d| d.set(b"UserUnit".to_vec(), Object::Real(unit))).unwrap();
+    reopen(&doc)
+}
+
+fn assert_added_dimension_paint(doc: &Document, index: usize, expected: &Content) {
+    let item = &list_added(doc)[index];
+    let object = doc.get(item.obj);
+    let Object::Stream(stream) = &*object else { panic!("added stream") };
+    let bytes = stream.decoded().unwrap();
+    let parsed = pdfcraft_content::parse(&bytes);
+    assert_eq!(parsed.skipped, 0);
+    let unit = pdfcraft_model::pages(doc)[2].user_unit(doc);
+    let matrix = parsed.ops.iter().find(|op| op.is("cm")).unwrap().nums::<6>().unwrap();
+    let close = |actual: f64, expected: f64| {
+        assert!((actual - expected).abs() <= expected.abs().max(1e-12) * 1e-12, "{actual} != {expected}");
+    };
+    // These fixtures are upright; composing page UserUnit and the saved outer matrix restores
+    // physical display coordinates, even when individual PDF operands are far below .001.
+    let scale = unit * matrix[0];
+    match expected {
+        Content::Text(t) => {
+            let tm = parsed.ops.iter().find(|op| op.is("Tm")).unwrap().nums::<6>().unwrap();
+            let font = parsed.ops.iter().find(|op| op.is("Tf")).unwrap().num(1).unwrap();
+            close(scale * font, t.size);
+            close(scale * tm[4], t.rect[0]);
+            close(scale * tm[5], t.rect[3] - 0.95 * t.size);
+            assert!(String::from_utf8(bytes).unwrap().contains(&format!("({}) Tj", t.text)));
+        }
+        Content::Image(i) => {
+            let clip = parsed.ops.iter().find(|op| op.is("re")).unwrap().nums::<4>().unwrap();
+            for (actual, expected) in clip.into_iter().zip([i.rect[0], i.rect[1], i.rect[2] - i.rect[0], i.rect[3] - i.rect[1]]) {
+                close(scale * actual, expected);
+            }
+            let inner = parsed.ops.iter().filter(|op| op.is("cm")).nth(1).unwrap().nums::<6>().unwrap();
+            close(scale * inner[0], (i.rect[2] - i.rect[0]) * if i.flip_h { -1.0 } else { 1.0 });
+            close(scale * inner[3], i.rect[3] - i.rect[1]);
+            close(scale * inner[4], if i.flip_h { i.rect[2] } else { i.rect[0] });
+            close(scale * inner[5], i.rect[1]);
+        }
+    }
+}
+
+fn check_legacy_added_text_dimensions(unit: f64) {
+    let mut doc = legacy_added_dimension_fixture(unit);
+    let Content::Text(mut text) = list_added(&doc)[0].content.clone() else { panic!("text") };
+    let original = text.clone();
+    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
+    text.text = "sx".into(); // Same glyph advances: this edit preserves wrapping and height.
+    update_content(&mut doc, 2, 0, &Content::Text(text.clone())).unwrap();
+    doc = reopen(&doc);
+    let Content::Text(saved) = list_added(&doc)[0].content.clone() else { panic!("text") };
+    assert_eq!((saved.text.as_str(), saved.size), (text.text.as_str(), text.size));
+    for (actual, expected) in saved.rect.into_iter().zip(text.rect) {
+        assert!((actual - expected).abs() <= expected.abs() * 1e-12);
+    }
+    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
+    let obj = doc.get(list_added(&doc)[0].obj);
+    assert!(obj.as_dict().unwrap().get(b"PCAdded").unwrap().as_dict().unwrap().contains(b"UserUnit"));
+    let scale = pdfcraft_model::pages(&doc)[2].user_unit(&doc);
+    for (coordinate, delta) in text.rect.iter_mut().zip([7.3, 4.7, 7.3, 4.7]) {
+        *coordinate += delta * scale;
+    }
+    if unit == 0.01 {
+        assert_ne!(text.rect[2] - text.rect[0], original.rect[2] - original.rect[0], "ordinary translation changes subtraction rounding");
+    }
+    update_content(&mut doc, 2, 0, &Content::Text(text)).unwrap();
+    doc = reopen(&doc);
+    let Content::Text(mut text) = list_added(&doc)[0].content.clone() else { panic!("text") };
+    assert_eq!(text.size, original.size);
+    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
+    text.text = "xs".into();
+    update_content(&mut doc, 2, 0, &Content::Text(text.clone())).unwrap();
+    assert_added_dimension_paint(&reopen(&doc), 0, &Content::Text(text));
+}
+
+fn check_legacy_added_image_dimensions(unit: f64) {
+    let mut doc = legacy_added_dimension_fixture(unit);
+    let Content::Image(mut image) = list_added(&doc)[1].content.clone() else { panic!("image") };
+    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
+    image.flip_h = true;
+    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
+    doc = reopen(&doc);
+    assert_eq!(list_added(&doc)[1].content, Content::Image(image.clone()));
+    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
+    let scale = pdfcraft_model::pages(&doc)[2].user_unit(&doc);
+    for (coordinate, delta) in image.rect.iter_mut().zip([7.3, 4.7, 7.3, 4.7]) {
+        *coordinate += delta * scale;
+    }
+    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
+    doc = reopen(&doc);
+    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
+    image.flip_h = false;
+    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
+    assert_added_dimension_paint(&reopen(&doc), 1, &Content::Image(image));
+}
+
+#[test]
+fn legacy_added_dimension_updates_large_text() {
+    check_legacy_added_text_dimensions(100.0);
+}
+
+#[test]
+fn legacy_added_dimension_updates_small_text() {
+    check_legacy_added_text_dimensions(0.01);
+}
+
+#[test]
+fn legacy_added_dimension_updates_tiny_paint() {
+    check_legacy_added_text_dimensions(0.000001);
+    check_legacy_added_image_dimensions(0.000001);
+}
+
+#[test]
+fn legacy_added_dimension_updates_small_images() {
+    check_legacy_added_image_dimensions(0.01);
+}
+
+#[test]
+fn legacy_added_dimension_updates_reject_new_and_resized() {
+    for unit in [0.01, 100.0] {
+        let mut doc = legacy_added_dimension_fixture(unit);
+        let before = streams(&doc, 2);
+        let Content::Text(text) = list_added(&doc)[0].content.clone() else { panic!("text") };
+        // Preserving a migrated size must still reject text the standard font cannot draw.
+        let before_glyph_rejection = write_incremental(&doc, &SaveOptions::default()).unwrap();
+        let unsupported = AddedText { text: "xs 中".into(), ..text.clone() };
+        let error = update_content(&mut doc, 2, 0, &Content::Text(unsupported)).unwrap_err();
+        assert!(error.to_string().contains("U+4E2D"), "{error}");
+        assert_eq!(
+            write_incremental(&doc, &SaveOptions::default()).unwrap(),
+            before_glyph_rejection,
+            "refused migrated glyph edit leaves all document objects intact"
+        );
+        assert!(add_content(&mut doc, 2, &Content::Text(text.clone())).is_err(), "new text keeps authoring size limits");
+        for size in [text.size * 2.0, 0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(update_content(&mut doc, 2, 0, &Content::Text(AddedText { size, ..text.clone() })).is_err());
+        }
+        if unit < 1.0 {
+            let Content::Image(image) = list_added(&doc)[1].content.clone() else { panic!("image") };
+            assert!(add_content(&mut doc, 2, &Content::Image(image.clone())).is_err(), "new image keeps authoring extent limits");
+            for width in [(text.rect[2] - text.rect[0]) / 2.0, 0.0, f64::NAN, f64::INFINITY] {
+                let mut resized = text.clone();
+                resized.rect[2] = resized.rect[0] + width;
+                assert!(update_content(&mut doc, 2, 0, &Content::Text(resized)).is_err(), "changed text width remains bounded");
+            }
+            for axis in [0, 1] {
+                for extent in [(image.rect[axis + 2] - image.rect[axis]) / 2.0, 0.0, f64::NAN, f64::INFINITY] {
+                    let mut resized = image.clone();
+                    resized.rect[axis + 2] = resized.rect[axis] + extent;
+                    assert!(update_content(&mut doc, 2, 1, &Content::Image(resized)).is_err(), "changed image extent remains bounded");
+                }
+            }
+        }
+        assert_eq!(streams(&doc, 2), before, "refused edits leave existing content intact");
+    }
+}
+
+#[test]
+fn legacy_added_dimension_updates_ordinary_translation_cancellation() {
+    let mut doc = legacy_added_dimension_fixture_with_rect(0.5, [0.3, 5.0, 1.5, 20.0]);
+    for index in [0, 1] {
+        let content = list_added(&doc)[index].content.clone();
+        let mut rect = content.rect();
+        let width = rect[2] - rect[0];
+        rect[0] += 20.0;
+        rect[2] += 20.0;
+        let moved_width = rect[2] - rect[0];
+        assert!((moved_width - width).abs() > width * (8.0 * f64::EPSILON), "ordinary movement exceeds an eight-ulp dimension tolerance");
+        let moved = content.with_rect(rect);
+        update_content(&mut doc, 2, index, &moved).unwrap();
+        doc = reopen(&doc);
+        assert_added_dimension_paint(&doc, index, &moved);
+        // The migrated marker must also preserve the width on another edit.
+        let repeated = list_added(&doc)[index].content.clone();
+        update_content(&mut doc, 2, index, &repeated).unwrap();
+        doc = reopen(&doc);
+        assert_added_dimension_paint(&doc, index, &moved);
+        rect[2] = rect[0] + width * 0.99;
+        assert!(update_content(&mut doc, 2, index, &moved.with_rect(rect)).is_err(), "a genuine below-minimum resize is still refused");
+    }
+}
+
+#[test]
+fn legacy_added_dimension_updates_reject_overflowing_preserved_layout() {
+    for (text, family, align) in
+        [("x\nx", Family::Helvetica, Align::Left), ("xxxx", Family::Courier, Align::Center), ("xxxx", Family::Courier, Align::Right)]
+    {
+        let mut doc = legacy_added_dimension_fixture(1.0);
+        let item = list_added(&doc)[0].clone();
+        let Object::Stream(mut stream) = (*doc.get(item.obj)).clone() else { panic!("text stream") };
+        let mut metadata = stream.dict.get(b"PCAdded").unwrap().as_dict().unwrap().clone();
+        metadata.set(b"Size".to_vec(), Object::Real(1e308));
+        metadata.set(b"Font".to_vec(), Object::name(family.base_font(false, false)));
+        stream.dict.set(b"PCAdded".to_vec(), Object::Dict(metadata));
+        doc.set(item.obj, Object::Stream(stream));
+        let Content::Text(old) = list_added(&doc)[0].content.clone() else { panic!("text") };
+        assert!(old.rect.iter().all(|v| v.is_finite()) && old.size.is_finite());
+        let update = AddedText { text: text.into(), align, ..old };
+        if family == Family::Courier {
+            assert!(added::text_rect(&update).iter().all(|v| v.is_finite()), "single-line height stays finite while its advance overflows");
+            assert!(!family.width(text, update.size, false).is_finite());
+        } else {
+            assert!(!added::text_rect(&update).iter().all(|v| v.is_finite()));
+        }
+        let before = write_incremental(&doc, &SaveOptions::default()).unwrap();
+        assert!(update_content(&mut doc, 2, 0, &Content::Text(update)).is_err());
+        assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before, "rejected layout leaves all document objects intact");
+    }
+}

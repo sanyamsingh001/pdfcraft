@@ -557,7 +557,11 @@ impl crate::PdfCraftApp {
     pub fn open_field_props(&mut self, name: &str, widget: usize) {
         let Some((_, id)) = self.active_ids() else { return };
         let Some(f) = self.session.get(id).and_then(|d| d.form.iter().find(|f| f.name == name).cloned()) else { return };
-        let mut d = FieldDraft::new(&f, widget);
+        let page = f.widgets.get(widget).and_then(|w| w.page);
+        let unit = page
+            .and_then(|page| self.session.get(id).and_then(|doc| doc.info.pages.get(page)))
+            .map_or(1.0, |page| crate::forms_ui::page_user_unit(page) as f64);
+        let mut d = FieldDraft::new(&f, widget).with_font_unit(unit);
         d.look = self.session.get(id).and_then(|doc| doc.field_look(name));
         d.check_style = self.session.get(id).and_then(|doc| doc.field_check_style(name));
         if let Some(o) = d.original.as_mut() {
@@ -662,8 +666,10 @@ pub struct FieldDraft {
     pub default: String,
     /// Check boxes and radio buttons: this widget's "on" state (export value).
     pub on_state: String,
-    /// 0 = auto.
+    /// Physical points on the selected widget's page; 0 = auto.
     pub font_size: f64,
+    // A shared field still has one raw DA size; other pages may display it at another scale.
+    font_unit: f64,
     /// Left, bottom, width, height in points.
     pub position: [f64; 4],
     /// `/MK /R`: 0, 90, 180 or 270 degrees counterclockwise.
@@ -710,6 +716,7 @@ impl FieldDraft {
             default: f.default.first().cloned().unwrap_or_default(),
             on_state: f.widgets.get(widget).and_then(|w| w.on_state.clone()).unwrap_or_default(),
             font_size: da_size(&f.da),
+            font_unit: 1.0,
             position: [r[0], r[1], r[2] - r[0], r[3] - r[1]],
             rotation: f.widgets.get(widget).map(|w| w.rotation).unwrap_or(0),
             look: None,
@@ -724,6 +731,17 @@ impl FieldDraft {
         };
         d.original = Box::new(Some(d.clone()));
         d
+    }
+
+    // Convert the UI working copy only. FieldProps and saved DA sizes stay in raw units.
+    fn with_font_unit(mut self, unit: f64) -> Self {
+        self.font_unit = unit;
+        self.font_size *= unit;
+        if let Some(original) = self.original.as_mut() {
+            original.font_unit = unit;
+            original.font_size = self.font_size;
+        }
+        self
     }
 
     pub fn title(&self) -> &'static str {
@@ -762,7 +780,8 @@ impl FieldDraft {
             multiline: ch(self.multiline, o.multiline),
             max_len: ((self.limit, self.max_len) != (o.limit, o.max_len)).then_some((self.limit && self.max_len > 0).then_some(self.max_len)),
             options: (self.options != o.options).then(|| self.options.clone()),
-            font_size: ((self.font_size - o.font_size).abs() > 1e-6).then_some(self.font_size),
+            // Preserve the existing raw-unit change tolerance at every physical page scale.
+            font_size: ((self.font_size / self.font_unit - o.font_size / o.font_unit).abs() > 1e-6).then_some(self.font_size / self.font_unit),
             rect: (self.position != o.position).then(|| {
                 let [x, y, w, h] = self.position;
                 (self.widget, [x, y, x + w.max(4.0), y + h.max(4.0)])
@@ -859,9 +878,29 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
                     let mut auto = d.font_size == 0.0;
                     ui.horizontal(|ui| {
                         if ui.checkbox(&mut auto, tl!("Auto")).changed() {
-                            d.font_size = if auto { 0.0 } else { 12.0 };
+                            d.font_size = if auto { 0.0 } else { 12.0_f64.clamp(2.0 * d.font_unit, 100.0 * d.font_unit) };
                         }
-                        ui.add_enabled(!auto, egui::DragValue::new(&mut d.font_size).range(2.0..=100.0).speed(0.25).suffix(" pt"));
+                        // Keep the existing raw-size bounds while displaying physical points.
+                        let range = 2.0 * d.font_unit..=100.0 * d.font_unit;
+                        let formatter = ui.style().number_formatter.clone();
+                        let response = ui.add_enabled(
+                            !auto,
+                            egui::DragValue::new(&mut d.font_size)
+                                .range(range)
+                                .clamp_existing_to_range(false)
+                                .speed(0.25)
+                                .custom_formatter(move |value, decimals| {
+                                    let text = formatter.format(value, decimals);
+                                    // Focus/blur must not turn display rounding into a font edit.
+                                    if text.parse::<f64>().ok() == Some(value) { text } else { value.to_string() }
+                                })
+                                .suffix(" pt"),
+                        );
+                        // Keep loaded values and Auto untouched; bound every intentional edit,
+                        // including keyboard/accessibility increments that egui does not clamp.
+                        if !auto && response.changed() {
+                            d.font_size = d.font_size.clamp(2.0 * d.font_unit, 100.0 * d.font_unit);
+                        }
                     });
                     ui.end_row();
                     if let Some(l) = d.look.as_mut() {

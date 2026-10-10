@@ -216,7 +216,7 @@ mod tests {
     /// A 300 x 400 page shown turned `rotation` degrees clockwise.
     fn page(rotation: u16) -> PageInfo {
         let (width, height) = if rotation.is_multiple_of(180) { (300.0, 400.0) } else { (400.0, 300.0) };
-        PageInfo { width, height, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation }
+        PageInfo { width, height, user_unit: 1.0, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation }
     }
 
     fn png(w: u32, h: u32) -> Vec<u8> {

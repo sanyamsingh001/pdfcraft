@@ -475,3 +475,285 @@ fn actions_tab_adds_and_removes_actions() {
         ]
     );
 }
+
+mod user_unit_font_properties {
+    use super::*;
+    use egui::accesskit::{Role, Toggled};
+    use egui_kittest::kittest::NodeT;
+    use pdfcraft_cos::{Document, Object, SaveOptions};
+    use pdfcraft_engine::{Edit, FieldProps, FieldValue};
+    use std::sync::Arc;
+
+    fn app(unit: f64, raw_size: f64) -> PdfCraftApp {
+        app_with_page(unit, raw_size, false)
+    }
+
+    fn app_with_page(unit: f64, raw_size: f64, tiny: bool) -> PdfCraftApp {
+        let mut doc = Document::open(Arc::new(include_bytes!("data/form.pdf").to_vec())).unwrap();
+        let page = pdfcraft_model::pages(&doc)[0].obj;
+        doc.update_dict(page, |d| {
+            d.set(b"UserUnit".to_vec(), Object::Real(unit));
+            if tiny {
+                let bounds = Object::Array(vec![Object::Int(0), Object::Int(0), Object::Int(1), Object::Int(1)]);
+                d.set(b"MediaBox".to_vec(), bounds.clone());
+                d.set(b"CropBox".to_vec(), bounds);
+            }
+        })
+        .unwrap();
+        if tiny {
+            // The fixture's last annotation is city; seed its input rectangle directly.
+            // Prepare's minimum authoring size does not constrain existing PDF widgets.
+            let widget = doc.get(page).as_dict().unwrap().get(b"Annots").unwrap().as_array().unwrap().last().unwrap().as_ref().unwrap();
+            let rect = Object::Array([0.1, 0.2, 0.9, 0.8].into_iter().map(Object::Real).collect());
+            doc.update_dict(widget, |d| d.set(b"Rect".to_vec(), rect)).unwrap();
+        }
+        let bytes = pdfcraft_cos::write_full(&doc, &SaveOptions::default()).unwrap();
+        let mut app = PdfCraftApp::new();
+        app.open_bytes("unit-form.pdf", None, bytes).unwrap();
+        // The engine property remains raw DA units; only the Properties UI converts points.
+        assert!(app.apply_edit(Edit::SetFieldProps {
+            name: "city".into(),
+            props: Box::new(FieldProps { font_size: Some(raw_size), ..Default::default() }),
+        }));
+        app
+    }
+
+    fn tf_size(text: &str) -> f64 {
+        let words: Vec<_> = text.split_whitespace().collect();
+        words.windows(2).rev().find(|pair| pair[1] == "Tf").unwrap()[0].parse().unwrap()
+    }
+
+    #[test]
+    fn properties_read_and_save_explicit_physical_font_points() {
+        for (unit, original_raw, expected_raw) in [(0.5, 36.0, 24.0), (1.0, 18.0, 12.0), (2.0, 9.0, 6.0)] {
+            let mut app = app(unit, original_raw);
+            let id = app.views[0].id;
+            let original_rect = app.session.get(id).unwrap().form.iter().find(|f| f.name == "city").unwrap().widgets[0].rect;
+            app.open_field_props("city", 0);
+            let draft = app.field_props.as_mut().unwrap();
+            assert_eq!(draft.font_size, 18.0, "existing field is displayed in physical points");
+            assert!(draft.props().is_none(), "opening Properties must not rewrite DA");
+            draft.font_size = 12.0;
+            let props = draft.props().unwrap();
+            assert_eq!(props.font_size, Some(expected_raw), "12 physical points must convert once");
+            assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
+            assert!(app.apply_edit(Edit::SetFieldValue { name: "city".into(), value: FieldValue::Text("Edited12".into()) }));
+            let bytes = app.session.save_bytes(id).unwrap();
+            let mut reopened = PdfCraftApp::new();
+            reopened.open_bytes("saved-unit-form.pdf", None, bytes.as_ref().clone()).unwrap();
+            let saved = reopened.session.get(reopened.views[0].id).unwrap();
+            let field = saved.form.iter().find(|f| f.name == "city").unwrap();
+            assert_eq!(field.value, ["Edited12"]);
+            assert_eq!(field.widgets[0].rect, original_rect);
+            assert_eq!(tf_size(&field.da), expected_raw, "saved DA remains raw units");
+            let cos = Document::open(bytes).unwrap();
+            let widget = cos.get(field.widgets[0].obj);
+            let ap = cos.resolve(widget.as_dict().unwrap().get(b"AP").unwrap());
+            let normal = cos.resolve(ap.as_dict().unwrap().get(b"N").unwrap());
+            let Object::Stream(stream) = &*normal else { panic!("normal appearance") };
+            let appearance = String::from_utf8(stream.decoded().unwrap()).unwrap();
+            assert!(appearance.contains("(Edited12) Tj"));
+            assert_eq!(tf_size(&appearance), expected_raw, "regenerated appearance uses raw size once");
+            reopened.open_field_props("city", 0);
+            assert_eq!(reopened.field_props.as_ref().unwrap().font_size, 12.0);
+            assert!(reopened.field_props.as_ref().unwrap().props().is_none());
+        }
+    }
+
+    #[test]
+    fn properties_auto_zero_survives_readback_and_explicit_to_auto_changes() {
+        for unit in [0.5, 1.0, 2.0] {
+            let mut app = app(unit, 0.0);
+            app.open_field_props("city", 0);
+            let draft = app.field_props.as_ref().unwrap();
+            assert_eq!(draft.font_size, 0.0);
+            assert!(draft.props().is_none());
+            // An unrelated property edit must leave the raw Auto sentinel alone.
+            app.field_props.as_mut().unwrap().tooltip = "Auto field".into();
+            let props = app.field_props.as_ref().unwrap().props().unwrap();
+            assert_eq!(props.font_size, None);
+            assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
+            app.open_field_props("city", 0);
+            app.field_props.as_mut().unwrap().font_size = 12.0;
+            let props = app.field_props.as_ref().unwrap().props().unwrap();
+            assert_eq!(props.font_size, Some(12.0 / unit));
+            assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
+            app.open_field_props("city", 0);
+            app.field_props.as_mut().unwrap().font_size = 0.0;
+            let props = app.field_props.as_ref().unwrap().props().unwrap();
+            assert_eq!(props.font_size, Some(0.0));
+            assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
+            let bytes = app.session.save_bytes(app.views[0].id).unwrap();
+            let mut reopened = PdfCraftApp::new();
+            reopened.open_bytes("auto-unit-form.pdf", None, bytes.as_ref().clone()).unwrap();
+            let saved = reopened.session.get(reopened.views[0].id).unwrap();
+            assert_eq!(tf_size(&saved.form.iter().find(|f| f.name == "city").unwrap().da), 0.0);
+            reopened.open_field_props("city", 0);
+            assert_eq!(reopened.field_props.as_ref().unwrap().font_size, 0.0);
+            assert!(reopened.field_props.as_ref().unwrap().props().is_none());
+        }
+    }
+
+    #[test]
+    fn properties_auto_toggle_chooses_twelve_physical_points() {
+        for (unit, raw) in [(0.5, 24.0), (1.0, 12.0), (2.0, 6.0)] {
+            let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+                let mut app = app(unit, 0.0);
+                app.open_field_props("city", 0);
+                app
+            });
+            h.run_steps(3);
+            h.get_by_label("Appearance").click();
+            h.run_steps(2);
+            assert_eq!(h.state().field_props.as_ref().unwrap().font_size, 0.0, "painting Appearance preserves Auto");
+            assert!(h.state().field_props.as_ref().unwrap().props().is_none());
+            assert_eq!(h.get_by_label("Auto").accesskit_node().toggled(), Some(Toggled::True));
+            assert!(h.get_by_role(Role::SpinButton).accesskit_node().is_disabled());
+            h.get_by_label("Auto").click();
+            h.run_steps(2);
+            let draft = h.state().field_props.as_ref().unwrap();
+            assert_eq!(draft.font_size, 12.0);
+            assert_eq!(draft.props().unwrap().font_size, Some(raw));
+            h.get_by_label("Auto").click();
+            h.run_steps(2);
+            let draft = h.state().field_props.as_ref().unwrap();
+            assert_eq!(draft.font_size, 0.0);
+            assert!(draft.props().is_none(), "returning to Auto leaves the original DA unchanged");
+        }
+    }
+
+    #[test]
+    fn properties_on_subpoint_pages_use_explicit_user_unit() {
+        let mut app = app_with_page(0.5, 12.0, true);
+        let id = app.views[0].id;
+        let rect = [0.1, 0.2, 0.9, 0.8];
+        assert_eq!(app.session.get(id).unwrap().form.iter().find(|f| f.name == "city").unwrap().widgets[0].rect, rect);
+        let page = &app.session.get(id).unwrap().info.pages[0];
+        assert_eq!(page.crop, [0.0, 0.0, 1.0, 1.0]);
+        // Keep the existing tiny-page layout policy, without mistaking it for the PDF unit.
+        assert_eq!((page.width, page.height), (612.0, 792.0));
+        assert_eq!(page.user_unit, 0.5);
+        app.open_field_props("city", 0);
+        let draft = app.field_props.as_mut().unwrap();
+        assert_eq!(draft.font_size, 6.0);
+        assert!(draft.props().is_none());
+        draft.font_size = 12.0;
+        let props = draft.props().unwrap();
+        assert_eq!(props.font_size, Some(24.0));
+        assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
+        assert!(app.apply_edit(Edit::SetFieldValue { name: "city".into(), value: FieldValue::Text("Tiny12".into()) }));
+        let bytes = app.session.save_bytes(id).unwrap();
+        let mut reopened = PdfCraftApp::new();
+        reopened.open_bytes("saved-tiny-unit-form.pdf", None, bytes.as_ref().clone()).unwrap();
+        let saved = reopened.session.get(reopened.views[0].id).unwrap();
+        assert_eq!(saved.info.pages[0].user_unit, 0.5);
+        assert_eq!((saved.info.pages[0].width, saved.info.pages[0].height), (612.0, 792.0));
+        let field = saved.form.iter().find(|f| f.name == "city").unwrap();
+        assert_eq!(field.value, ["Tiny12"]);
+        assert_eq!(field.widgets[0].rect, rect);
+        assert_eq!(tf_size(&field.da), 24.0);
+        let cos = Document::open(bytes).unwrap();
+        let widget = cos.get(field.widgets[0].obj);
+        let ap = cos.resolve(widget.as_dict().unwrap().get(b"AP").unwrap());
+        let normal = cos.resolve(ap.as_dict().unwrap().get(b"N").unwrap());
+        let Object::Stream(stream) = &*normal else { panic!("normal appearance") };
+        let appearance = String::from_utf8(stream.decoded().unwrap()).unwrap();
+        assert!(appearance.contains("(Tiny12) Tj"));
+        assert_eq!(tf_size(&appearance), 24.0);
+        reopened.open_field_props("city", 0);
+        assert_eq!(reopened.field_props.as_ref().unwrap().font_size, 12.0);
+        assert!(reopened.field_props.as_ref().unwrap().props().is_none());
+    }
+
+    #[test]
+    fn properties_small_user_units_preserve_raw_font_size_changes() {
+        let mut app = app(1e-8, 12.0);
+        let id = app.views[0].id;
+        let doc = app.session.get(id).unwrap();
+        let unit = doc.info.pages[0].user_unit as f64;
+        assert_eq!(unit, 1e-8_f32 as f64);
+        assert_eq!((doc.info.pages[0].width, doc.info.pages[0].height), (612.0, 792.0));
+        let rect = doc.form.iter().find(|f| f.name == "city").unwrap().widgets[0].rect;
+        app.open_field_props("city", 0);
+        let draft = app.field_props.as_mut().unwrap();
+        assert_eq!(draft.font_size, 12.0 * unit);
+        assert!(draft.props().is_none(), "opening Properties remains a no-op");
+        draft.font_size = 24.0 * unit;
+        assert!((draft.font_size - 12.0 * unit).abs() < 1e-6, "physical delta exposes the previous tolerance bug");
+        let props = draft.props().expect("raw12 to raw24 must remain an edit at small physical scales");
+        assert_eq!(props.font_size, Some(24.0));
+        assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
+        assert!(app.apply_edit(Edit::SetFieldValue { name: "city".into(), value: FieldValue::Text("Raw24".into()) }));
+        let bytes = app.session.save_bytes(id).unwrap();
+        let mut reopened = PdfCraftApp::new();
+        reopened.open_bytes("saved-small-unit-form.pdf", None, bytes.as_ref().clone()).unwrap();
+        let saved = reopened.session.get(reopened.views[0].id).unwrap();
+        assert_eq!(saved.info.pages[0].user_unit as f64, unit);
+        let field = saved.form.iter().find(|f| f.name == "city").unwrap();
+        assert_eq!(field.value, ["Raw24"]);
+        assert_eq!(field.widgets[0].rect, rect);
+        assert_eq!(tf_size(&field.da), 24.0);
+        let cos = Document::open(bytes).unwrap();
+        let widget = cos.get(field.widgets[0].obj);
+        let ap = cos.resolve(widget.as_dict().unwrap().get(b"AP").unwrap());
+        let normal = cos.resolve(ap.as_dict().unwrap().get(b"N").unwrap());
+        let Object::Stream(stream) = &*normal else { panic!("normal appearance") };
+        let appearance = String::from_utf8(stream.decoded().unwrap()).unwrap();
+        assert!(appearance.contains("(Raw24) Tj"));
+        assert_eq!(tf_size(&appearance), 24.0);
+        reopened.open_field_props("city", 0);
+        let draft = reopened.field_props.as_mut().unwrap();
+        assert_eq!(draft.font_size, 24.0 * unit);
+        assert!(draft.props().is_none(), "reopened Properties remains a no-op");
+        draft.font_size = 0.0;
+        assert_eq!(draft.props().unwrap().font_size, Some(0.0), "Auto zero must also remain an edit");
+    }
+
+    #[test]
+    fn properties_font_control_preserves_unedited_values_and_edit_bounds() {
+        for (unit, raw) in [(1e-4, 12.0), (1e-8, 12.0), (1.0, 12.0), (1.0, 18.0)] {
+            let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+                let mut app = app(unit, raw);
+                app.open_field_props("city", 0);
+                app
+            });
+            h.run_steps(3);
+            h.get_by_label("Appearance").click();
+            h.run_steps(2);
+            let original = h.state().field_props.as_ref().unwrap().font_size;
+            assert_eq!(h.get_all_by_role(Role::SpinButton).count(), 1);
+            assert!(h.state().field_props.as_ref().unwrap().props().is_none());
+            h.get_by_role(Role::SpinButton).focus();
+            h.run_steps(2);
+            assert!(h.get_by_role(Role::SpinButton).is_focused());
+            assert_eq!(h.state().field_props.as_ref().unwrap().font_size, original);
+            // Blur while Appearance stays mounted, exercising DragValue's text commit.
+            h.get_by_label("Appearance").focus();
+            h.run_steps(2);
+            assert!(!h.get_by_role(Role::SpinButton).is_focused());
+            assert_eq!(h.state().field_props.as_ref().unwrap().font_size, original);
+            assert!(h.state().field_props.as_ref().unwrap().props().is_none(), "focus/blur is not a font edit");
+        }
+
+        for (raw, key) in [(100.0, egui::Key::ArrowUp), (2.0, egui::Key::ArrowDown)] {
+            let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+                let mut app = app(1.0, raw);
+                app.open_field_props("city", 0);
+                app
+            });
+            h.run_steps(3);
+            h.get_by_label("Appearance").click();
+            h.run_steps(2);
+            h.get_by_role(Role::SpinButton).focus();
+            h.run_steps(2);
+            assert!(h.get_by_role(Role::SpinButton).is_focused());
+            h.key_press(key);
+            h.run_steps(2);
+            assert_eq!(h.state().field_props.as_ref().unwrap().font_size, raw, "keyboard edits respect the raw bounds");
+            h.get_by_label("General").click();
+            h.run_steps(2);
+            assert_eq!(h.state().field_props.as_ref().unwrap().font_size, raw);
+            assert!(h.state().field_props.as_ref().unwrap().props().is_none());
+        }
+    }
+}

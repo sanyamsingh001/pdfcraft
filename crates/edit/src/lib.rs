@@ -146,11 +146,11 @@ fn picture(src: &MarkSource, page: (f64, f64), scale: f64, rotation: f64, offset
     let (cx, cy) = (w / 2.0 + offset[0], h / 2.0 + offset[1]);
     // Centre, rotate, then place the picture's box (unit square for images).
     let place = if src.image {
-        format!("{} 0 0 {} {} {} cm", n(dw), n(dh), n(-dw / 2.0), n(-dh / 2.0))
+        format!("{} 0 0 {} {} {} cm", matrix_number(dw), matrix_number(dh), matrix_number(-dw / 2.0), matrix_number(-dh / 2.0))
     } else {
-        format!("{} 0 0 {} {} {} cm", n(k), n(k), n(-dw / 2.0), n(-dh / 2.0))
+        format!("{} 0 0 {} {} {} cm", matrix_number(k), matrix_number(k), matrix_number(-dw / 2.0), matrix_number(-dh / 2.0))
     };
-    format!("{} {} {} {} {} {} cm\n{place}\n/PCPic{} Do\n", n(c), n(s), n(-s), n(c), n(cx), n(cy), src.xobject.num)
+    format!("{} {} {} {} {} {} cm\n{place}\n/PCPic{} Do\n", n(c), n(s), n(-s), n(c), matrix_number(cx), matrix_number(cy), src.xobject.num)
 }
 
 /// Register a mark picture in the page's own resources (`/PCPic<num>`).
@@ -169,6 +169,13 @@ fn add_picture_resource(doc: &mut Document, page: &pdfcraft_model::Page, src: &M
 pub struct Context {
     /// Today's date: (year, month 1–12, day 1–31).
     pub date: (i64, u32, u32),
+}
+
+// Model-derived transforms can contain tiny scale factors; retain their PDF decimal precision.
+fn matrix_number(value: f64) -> String {
+    let mut bytes = Vec::new();
+    pdfcraft_cos::serialize(&Object::Real(value), &mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn n(v: f64) -> String {
@@ -364,12 +371,12 @@ fn begin(kind: MarkKind, subtype: &str, matrix: [f64; 6]) -> String {
     format!(
         "q\n/Artifact <</Type /Pagination /Subtype /{subtype} /PCMark /{}>> BDC\n{} {} {} {} {} {} cm\n",
         kind.tag(),
-        n(matrix[0]),
-        n(matrix[1]),
-        n(matrix[2]),
-        n(matrix[3]),
-        n(matrix[4]),
-        n(matrix[5])
+        matrix_number(matrix[0]),
+        matrix_number(matrix[1]),
+        matrix_number(matrix[2]),
+        matrix_number(matrix[3]),
+        matrix_number(matrix[4]),
+        matrix_number(matrix[5])
     )
 }
 
@@ -550,7 +557,13 @@ pub fn add_background(doc: &mut Document, pages: &[usize], bg: &Background, repl
                 content.push_str(&format!("/PCGS{} gs\n", (opacity * 100.0).round() as i64));
                 content.push_str(&picture(src, (w, h), bg.scale, 0.0, [0.0; 2]));
             }
-            None => content.push_str(&format!("/PCGS{} gs\n{}\n0 0 {} {} re f\n", (opacity * 100.0).round() as i64, rgb(bg.color), n(w), n(h))),
+            None => content.push_str(&format!(
+                "/PCGS{} gs\n{}\n0 0 {} {} re f\n",
+                (opacity * 100.0).round() as i64,
+                rgb(bg.color),
+                matrix_number(w),
+                matrix_number(h)
+            )),
         }
         content.push_str(END);
         add_resources(doc, &page, Some(opacity), None)?;

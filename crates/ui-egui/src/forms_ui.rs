@@ -59,6 +59,20 @@ fn widget_rect(xf: &PageXform, info: &DocInfo, page: usize, r: [f64; 4]) -> Rect
     xf.user_rect(info, page, [r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32])
 }
 
+// Layout may substitute placeholder dimensions; the raw-to-physical unit stays explicit.
+pub(crate) fn page_user_unit(page: &pdfcraft_render::PageInfo) -> f32 {
+    let unit = page.user_unit;
+    if unit.is_finite() && unit > 0.0 && unit <= 75_000.0 { unit } else { 1.0 }
+}
+
+// DA font sizes and widget heights are raw PDF units; the canvas zoom is per physical point.
+fn editor_font_size(da: &str, rect: [f64; 4], zoom: f32, page: &pdfcraft_render::PageInfo) -> f32 {
+    let unit = page_user_unit(page);
+    let da = da.split_whitespace().collect::<Vec<_>>();
+    let size = da.iter().position(|x| *x == "Tf").and_then(|i| da.get(i.wrapping_sub(1))).and_then(|s| s.parse::<f32>().ok()).filter(|s| *s > 0.0);
+    (size.unwrap_or(((rect[3] - rect[1]) as f32 * 0.6).clamp(6.0, 12.0)) * unit * zoom).clamp(6.0, 64.0)
+}
+
 fn fillable(f: &FormField) -> bool {
     !f.read_only() && !matches!(f.kind, FormFieldKind::PushButton | FormFieldKind::Signature)
 }
@@ -287,11 +301,8 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, f
     let mut next: Option<bool> = None; // Tab / Shift+Tab
     match f.kind {
         FormFieldKind::Text => {
-            let da = f.da.split_whitespace().collect::<Vec<_>>();
-            let size =
-                da.iter().position(|x| *x == "Tf").and_then(|i| da.get(i.wrapping_sub(1))).and_then(|s| s.parse::<f32>().ok()).filter(|s| *s > 0.0);
             let multiline = f.has(field_flags::MULTILINE);
-            let font = (size.unwrap_or(((w.rect[3] - w.rect[1]) as f32 * 0.6).clamp(6.0, 12.0)) * zoom).clamp(6.0, 64.0);
+            let font = editor_font_size(&f.da, w.rect, zoom, info.pages.get(page)?);
             egui::Area::new(egui::Id::new(("form-editor", view.id.0))).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
                 ui.set_min_size(rect.size());
                 let Some(fx) = view.forms.focus.as_mut() else { return };
@@ -433,4 +444,38 @@ pub fn field_screen_rect(view: &DocView, info: &DocInfo, f: &FormField, widget: 
     let page = w.page?;
     let xf = view.page_xform(page)?;
     Some(widget_rect(&xf, info, page, w.rect))
+}
+
+#[cfg(test)]
+mod user_unit_tests {
+    use super::editor_font_size;
+    use pdfcraft_render::PageInfo;
+
+    #[test]
+    fn focused_form_fonts_convert_raw_sizes_to_physical_points_once() {
+        let widget = [20.0, 30.0, 80.0, 50.0];
+        for rotation in [0, 90, 180, 270] {
+            for unit in [0.5, 1.0, 2.0] {
+                let (width, height) = if rotation % 180 == 0 { (100.0, 200.0) } else { (200.0, 100.0) };
+                let page = PageInfo {
+                    width: width * unit,
+                    height: height * unit,
+                    user_unit: unit,
+                    label: "1".into(),
+                    crop: [10.0, 20.0, 110.0, 220.0],
+                    rotation,
+                };
+                // At 125% zoom an 18-unit explicit font and a 12-unit height-based fallback
+                // must use the same physical conversion as their saved appearance.
+                for (da, raw_size) in [("/Helv 18 Tf 0 g", 18.0), ("/Helv 0 Tf 0 g", 12.0), ("", 12.0)] {
+                    let expected = raw_size * unit * 1.25;
+                    let actual = editor_font_size(da, widget, 1.25, &page);
+                    assert!((actual - expected).abs() < 0.001, "rotation={rotation}, unit={unit}, DA={da}: {actual} != {expected}");
+                }
+                // Keep the existing screen-size limits for tiny and large text.
+                assert_eq!(editor_font_size("/Helv 1 Tf", widget, 1.0, &page), 6.0);
+                assert_eq!(editor_font_size("/Helv 200 Tf", widget, 1.0, &page), 64.0);
+            }
+        }
+    }
 }

@@ -2240,29 +2240,69 @@ fn doc_info_rects_are_displayed_page_coordinates() {
 }
 
 /// `comment_add` places a note's or an attachment's icon with its displayed top-left corner at
-/// `at`, on rotated pages too. The engine anchors the icon at the user-space top-left of its
-/// `/Rect`, which after `/Rotate` is another corner of the square as displayed; converting the
-/// point alone put the icon one icon-width off.
+/// `at`, on rotated pages too. The engine's 20-unit square has a physical size of 20 * UserUnit;
+/// a tiny page's placeholder instead maps these raw extents one-to-one into the displayed page.
+/// The requested corner must survive live edits and save/reopen with a nonzero crop origin.
 #[test]
 fn note_icons_anchor_at_the_requested_corner_on_rotated_pages() {
-    let dir = workdir("note-anchor");
-    std::fs::write(dir.join("note.txt"), b"attached").unwrap();
-    let mut a = auto(&dir);
-    let doc = ok(&mut a, "doc_create", json!({ "from": "blank", "width": 612, "height": 792, "pages": 4 }))["doc"].as_u64().unwrap();
-    for (page, degrees) in [(2, 90), (3, 180), (4, 270)] {
-        ok(&mut a, "page_rotate", json!({ "doc": doc, "pages": [page], "degrees": degrees }));
-    }
-    for page in 1..=4 {
-        ok(&mut a, "comment_add", json!({ "doc": doc, "page": page, "type": "note", "at": [72, 72], "contents": "Fixture note" }));
-        ok(&mut a, "comment_add", json!({ "doc": doc, "page": page, "type": "attachment", "at": [200, 300], "path": "note.txt" }));
-    }
-    let comments = ok(&mut a, "comment_list", json!({ "doc": doc }));
-    let comments = comments["comments"].as_array().unwrap();
-    assert_eq!(comments.len(), 8);
-    for c in comments {
-        let want = if c["type"] == "Text" { [72.0, 72.0, 92.0, 92.0] } else { [200.0, 300.0, 220.0, 320.0] };
-        let rect: Vec<f64> = c["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
-        assert!(rect.iter().zip(want).all(|(x, y)| (x - y).abs() < 0.01), "page {} {}: rect {rect:?}, want {want:?}", c["page"], c["type"]);
+    use pdfcraft_cos::{Document, Object, SaveOptions, write_incremental};
+    for (unit, placeholder) in [(1.0, false), (2.0, false), (1.0 / 1024.0, true)] {
+        let dir = workdir(&format!("note-anchor-{unit}"));
+        std::fs::write(dir.join("note.txt"), b"attached").unwrap();
+        let mut cos = Document::open(std::sync::Arc::new(fixture(4))).unwrap();
+        for (page, degrees) in pdfcraft_model::pages(&cos).iter().zip([0, 90, 180, 270]) {
+            cos.update_dict(page.obj, |d| {
+                let crop =
+                    if placeholder { if matches!(degrees, 90 | 270) { [10, 20, 802, 632] } else { [10, 20, 622, 812] } } else { [10, 20, 190, 280] };
+                d.set(b"CropBox".to_vec(), Object::Array(crop.map(Object::Int).to_vec()));
+                if placeholder {
+                    d.set(b"MediaBox".to_vec(), Object::Array(crop.map(Object::Int).to_vec()));
+                }
+                d.set(b"Rotate".to_vec(), Object::Int(degrees));
+                d.set(b"UserUnit".to_vec(), if placeholder { Object::Real(unit) } else { Object::Int(unit as i64) });
+            })
+            .unwrap();
+        }
+        std::fs::write(dir.join("icons.pdf"), write_incremental(&cos, &SaveOptions::default()).unwrap()).unwrap();
+        let mut a = auto(&dir);
+        let doc = ok(&mut a, "doc_open", json!({ "path": "icons.pdf" }))["doc"].as_u64().unwrap();
+        for page in 1..=4 {
+            ok(&mut a, "comment_add", json!({ "doc": doc, "page": page, "type": "note", "at": [40, 40], "contents": "Fixture note" }));
+            ok(&mut a, "comment_add", json!({ "doc": doc, "page": page, "type": "attachment", "at": [100, 100], "path": "note.txt" }));
+        }
+        for phase in ["live", "saved", "reopened"] {
+            let current = match phase {
+                "saved" => {
+                    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "saved-icons.pdf" }));
+                    doc
+                }
+                "reopened" => ok(&mut a, "doc_open", json!({ "path": "saved-icons.pdf" }))["doc"].as_u64().unwrap(),
+                _ => doc,
+            };
+            if placeholder {
+                let info = ok(&mut a, "doc_info", json!({ "doc": current }));
+                for page in info["pages"].as_array().unwrap() {
+                    assert_eq!(page["width"], 612.0);
+                    assert_eq!(page["height"], 792.0);
+                }
+            }
+            let comments = ok(&mut a, "comment_list", json!({ "doc": current }));
+            let comments = comments["comments"].as_array().unwrap();
+            assert_eq!(comments.len(), 8);
+            for c in comments {
+                let at = if c["type"] == "Text" { 40.0 } else { 100.0 };
+                let size = if placeholder { 20.0 } else { 20.0 * unit };
+                let want = [at, at, at + size, at + size];
+                let rect: Vec<f64> = c["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+                assert_eq!(rect.len(), 4);
+                assert!(
+                    rect.iter().zip(want).all(|(x, y)| (x - y).abs() < 0.01),
+                    "UserUnit {unit}, {phase}, page {} {}: rect {rect:?}, want {want:?}",
+                    c["page"],
+                    c["type"]
+                );
+            }
+        }
     }
 }
 

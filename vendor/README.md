@@ -19,3 +19,5 @@ the fix. Vendoring copyleft code is never allowed (plan/adr/0001).
 Temporary: hayro is the bootstrap renderer and lopdf the bootstrap inspector (ADR-0004); M2.6 replaces them with our own devices and `cos`/`model`.
 
 Text extraction: hayro-interpret exposes `OutlineGlyph::is_vertical` from a Type0 font’s CMap writing mode. PdfCraft follows negative glyph-space y for WMode 1 so upright vertical columns can be searched (#126).
+
+Page units: hayro-syntax applies page-local `/UserUnit` to physical display dimensions and the completed crop/rotation transform once. Covered by `pdfcraft-render` `user_unit_tests::physical_geometry_raster_and_text_scale_once_with_local_user_units`.

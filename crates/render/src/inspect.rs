@@ -79,6 +79,9 @@ pub struct PageInfo {
     /// Displayed size in points, after `/Rotate` and `/UserUnit`.
     pub width: f32,
     pub height: f32,
+    /// Validated page-local raw-to-physical scale, independent of placeholder dimensions.
+    /// Missing or malformed `/UserUnit` uses 1.
+    pub user_unit: f32,
     /// Page label (`/PageLabels`), falling back to the 1-based page number.
     pub label: String,
     /// Effective crop box in user space [x0, y0, x1, y1] (the visible region).
@@ -365,7 +368,7 @@ pub fn inspect(bytes: Arc<Vec<u8>>, password: Option<&str>) -> Result<DocInfo, O
             let crop = [c.x0 as f32, c.y0 as f32, c.x1 as f32, c.y1 as f32];
             // Degenerate boxes still get a usable placeholder size so layout never divides by zero.
             let (w, h) = if w.is_finite() && h.is_finite() && w >= 1.0 && h >= 1.0 { (w, h) } else { (612.0, 792.0) };
-            out.push(PageInfo { width: w, height: h, label: (i + 1).to_string(), crop, rotation });
+            out.push(PageInfo { width: w, height: h, user_unit: page.user_unit(), label: (i + 1).to_string(), crop, rotation });
         }
         out
     }));
@@ -1268,7 +1271,7 @@ mod tests {
     fn view_and_user_space_round_trip_for_every_rotation() {
         for rotation in [0u16, 90, 180, 270] {
             let (w, h) = if rotation % 180 == 0 { (200.0, 300.0) } else { (300.0, 200.0) };
-            let p = super::PageInfo { width: w, height: h, label: String::new(), crop: [10.0, 20.0, 210.0, 320.0], rotation };
+            let p = super::PageInfo { width: w, height: h, user_unit: 1.0, label: String::new(), crop: [10.0, 20.0, 210.0, 320.0], rotation };
             for (x, y) in [(0.0, 0.0), (15.0, 40.0), (w, h)] {
                 let [ux, uy] = p.view_to_user(x, y);
                 let [vx, vy] = p.user_to_view(ux, uy);
@@ -1276,7 +1279,7 @@ mod tests {
             }
         }
         // Unrotated: the view's top-left is the crop box's top-left.
-        let p = super::PageInfo { width: 200.0, height: 300.0, label: String::new(), crop: [10.0, 20.0, 210.0, 320.0], rotation: 0 };
+        let p = super::PageInfo { width: 200.0, height: 300.0, user_unit: 1.0, label: String::new(), crop: [10.0, 20.0, 210.0, 320.0], rotation: 0 };
         assert_eq!(p.view_to_user(0.0, 0.0), [10.0, 320.0]);
         assert_eq!(p.view_rect_to_quad([0.0, 0.0, 10.0, 5.0]), [10.0, 320.0, 20.0, 320.0, 10.0, 315.0, 20.0, 315.0]);
     }
@@ -1306,7 +1309,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference((1, 0)));
         let mut info = DocInfo {
             pages: (1..=3)
-                .map(|n| PageInfo { width: 200.0, height: 300.0, crop: [0.0, 0.0, 200.0, 300.0], rotation: 0, label: n.to_string() })
+                .map(|n| PageInfo { width: 200.0, height: 300.0, user_unit: 1.0, crop: [0.0, 0.0, 200.0, 300.0], rotation: 0, label: n.to_string() })
                 .collect(),
             ..Default::default()
         };
@@ -1415,7 +1418,7 @@ mod tests {
         catalog.set("PageLabels", Object::Dictionary(tree));
         let count = MAX_LABEL_TOTAL_BYTES / MAX_LABEL_BYTES + 1;
         let mut pages: Vec<_> = (1..=count)
-            .map(|n| PageInfo { width: 200.0, height: 300.0, crop: [0.0, 0.0, 200.0, 300.0], rotation: 0, label: n.to_string() })
+            .map(|n| PageInfo { width: 200.0, height: 300.0, user_unit: 1.0, crop: [0.0, 0.0, 200.0, 300.0], rotation: 0, label: n.to_string() })
             .collect();
         let err = Inspector::new(&doc).page_labels(&catalog, &mut pages).unwrap_err();
         assert!(err.contains("4 MiB"), "{err}");
@@ -1698,7 +1701,7 @@ trailer << /Root 1 0 R >>
     #[test]
     fn destination_points_map_to_the_displayed_page() {
         // A crop box away from the origin: x 100..400, y 50..450.
-        let mut p = PageInfo { width: 300.0, height: 400.0, label: "1".into(), crop: [100.0, 50.0, 400.0, 450.0], rotation: 0 };
+        let mut p = PageInfo { width: 300.0, height: 400.0, user_unit: 1.0, label: "1".into(), crop: [100.0, 50.0, 400.0, 450.0], rotation: 0 };
         assert_eq!(p.dest_fraction(Some(100.0), Some(450.0), 0), [Some(0.0), Some(0.0)]);
         assert_eq!(p.dest_fraction(Some(250.0), Some(350.0), 0), [Some(0.5), Some(0.25)]);
         // Unspecified stays unspecified; off-page and huge values are clamped to the page.
@@ -1727,7 +1730,14 @@ trailer << /Root 1 0 R >>
             let mut info = DocInfo {
                 file_size: 321,
                 pdf_version: "1.7".into(),
-                pages: vec![PageInfo { width: 300.0, height: 200.0, label: "1".into(), crop: [10.0, 20.0, 210.0, 320.0], rotation: 90 }],
+                pages: vec![PageInfo {
+                    width: 300.0,
+                    height: 200.0,
+                    user_unit: 1.0,
+                    label: "1".into(),
+                    crop: [10.0, 20.0, 210.0, 320.0],
+                    rotation: 90,
+                }],
                 ..Default::default()
             };
             inspect_structure(&mut info, |tmp| {

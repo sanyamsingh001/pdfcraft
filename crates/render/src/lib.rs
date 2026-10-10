@@ -36,3 +36,6 @@ pub enum OpenError {
     #[error("{0}")]
     Unsupported(String),
 }
+
+#[cfg(test)]
+mod user_unit_tests;

@@ -84,8 +84,14 @@ fn rect_to_user(p: &PageInfo, r: [f64; 4]) -> [f64; 4] {
 /// displayed square is another corner of the user-space one, and the icon lands one icon-width
 /// away from where it was asked for.
 fn icon_anchor(p: &PageInfo, x: f64, y: f64) -> [f64; 2] {
-    let r = rect_to_user(p, [x, y, x + NOTE_SIZE, y + NOTE_SIZE]);
-    [r[0], r[3]]
+    // The engine builds a NOTE_SIZE square in raw user space, including on placeholder pages.
+    let [ux, uy] = to_user(p, x, y);
+    match p.rotation {
+        90 => [ux, uy + NOTE_SIZE],
+        180 => [ux - NOTE_SIZE, uy + NOTE_SIZE],
+        270 => [ux - NOTE_SIZE, uy],
+        _ => [ux, uy],
+    }
 }
 
 /// A user-space rectangle as the displayed-page rectangle every tool reports and accepts:
