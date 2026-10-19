@@ -1,0 +1,329 @@
+diff --git a/crates/edit/src/added.rs b/crates/edit/src/added.rs
+index f338368..0f0da2d 100644
+--- a/crates/edit/src/added.rs
++++ b/crates/edit/src/added.rs
+@@ -413,7 +413,16 @@ fn draw_arabic(doc: &mut Document, t: &AddedText, latin: &str, taken: &Dict, fon
+         for piece in pieces {
+             match piece {
+                 Piece::Latin(s) => {
+-                    out.extend(format!("/{latin} {} Tf {} Tw 1 0 0 1 {} {} Tm ", n(t.size), n(tw), n(pen), n(y)).bytes());
++                    out.extend(
++                        format!(
++                            "/{latin} {} Tf {} Tw 1 0 0 1 {} {} Tm ",
++                            matrix_number(t.size),
++                            matrix_number(tw),
++                            matrix_number(pen),
++                            matrix_number(y)
++                        )
++                        .bytes(),
++                    );
+                     out.extend(literal(&win_ansi(s)));
+                     out.extend_from_slice(b" Tj\n");
+                     current = Some(latin);
+@@ -426,10 +435,10 @@ fn draw_arabic(doc: &mut Document, t: &AddedText, latin: &str, taken: &Dict, fon
+                         // Codes start at 1; k % 240 + 1 is at most 240.
+                         let code = u8::try_from(k % GLYPHS_PER_FONT + 1).unwrap_or(1);
+                         if current != Some(name.as_str()) {
+-                            out.extend(format!("/{name} {} Tf ", n(t.size)).bytes());
++                            out.extend(format!("/{name} {} Tf ", matrix_number(t.size)).bytes());
+                             current = Some(name.as_str());
+                         }
+-                        out.extend(format!("1 0 0 1 {} {} Tm ", n(pen), n(y)).bytes());
++                        out.extend(format!("1 0 0 1 {} {} Tm ", matrix_number(pen), matrix_number(y)).bytes());
+                         out.extend(literal(&[code]));
+                         out.extend_from_slice(b" Tj\n");
+                         pen += c.advance * t.size + if c.text == " " { tw } else { 0.0 };
+@@ -565,7 +574,7 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
+             res.set(b"Font".to_vec(), Object::Dict(fonts));
+             let r = text_rect(t);
+             let [cr, cg, cb] = t.color.map(|v| v.clamp(0.0, 1.0));
+-            out.extend(format!("BT /{name} {} Tf {} {} {} rg\n", n(t.size), n(cr), n(cg), n(cb)).bytes());
++            out.extend(format!("BT /{name} {} Tf {} {} {} rg\n", matrix_number(t.size), n(cr), n(cg), n(cb)).bytes());
+             for (i, line) in lines(t).iter().enumerate() {
+                 let w = t.family.width(line, t.size, t.bold);
+                 let x = match t.align {
+@@ -580,7 +589,7 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
+                 let spaces = line.matches(' ').count();
+                 let tw =
+                     if t.align == Align::Justify && i + 1 < all.len() && spaces > 0 { ((r[2] - r[0]) - w).max(0.0) / spaces as f64 } else { 0.0 };
+-                out.extend(format!("1 0 0 1 {} {} Tm {} Tw ", n(x), n(y), n(tw)).bytes());
++                out.extend(format!("1 0 0 1 {} {} Tm {} Tw ", matrix_number(x), matrix_number(y), matrix_number(tw)).bytes());
+                 out.extend(literal(&win_ansi(line)));
+                 out.extend_from_slice(b" Tj\n");
+             }
+@@ -600,16 +609,16 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
+             out.extend(
+                 format!(
+                     "{} {} {} {} re W n {} {} {} {} {} {} cm /{name} Do\n",
+-                    n(r[0]),
+-                    n(r[1]),
+-                    n(r[2] - r[0]),
+-                    n(r[3] - r[1]),
+-                    n(a),
+-                    n(b),
+-                    n(c),
+-                    n(d),
+-                    n(e),
+-                    n(f)
++                    matrix_number(r[0]),
++                    matrix_number(r[1]),
++                    matrix_number(r[2] - r[0]),
++                    matrix_number(r[3] - r[1]),
++                    matrix_number(a),
++                    matrix_number(b),
++                    matrix_number(c),
++                    matrix_number(d),
++                    matrix_number(e),
++                    matrix_number(f)
+                 )
+                 .bytes(),
+             );
+@@ -705,25 +714,47 @@ fn parse(doc: &Document, d: &Dict, current_unit: f64) -> Option<Content> {
+     }
+ }
+ 
+-fn validate(c: &Content) -> Result<(), EditError> {
++// Translation can change a subtracted extent by a few ulps. Compare dimensions only, so
++// large coordinates never widen the exception for a genuinely resized item.
++fn preserved_extent(value: f64, previous: f64) -> bool {
++    value.is_finite()
++        && value > 0.0
++        && previous.is_finite()
++        && previous > 0.0
++        && (value - previous).abs() <= value.max(previous) * (8.0 * f64::EPSILON)
++}
++
++fn validate(c: &Content, previous: Option<&Content>) -> Result<(), EditError> {
+     let r = c.rect();
+     if !r.iter().all(|v| v.is_finite()) {
+         return Err(EditError::Invalid("invalid position".into()));
+     }
++    let width = (r[2] - r[0]).abs();
++    let old_rect = previous.map(Content::rect);
++    let kept_width = old_rect.is_some_and(|old| preserved_extent(width, (old[2] - old[0]).abs()));
+     match c {
+         Content::Text(t) => {
+             if t.text.trim().is_empty() {
+                 return Err(EditError::Invalid("type some text first".into()));
+             }
+-            if !(t.size.is_finite() && (1.0..=500.0).contains(&t.size)) {
++            let kept_size = matches!(previous, Some(Content::Text(old)) if t.size == old.size);
++            if !(t.size.is_finite() && t.size > 0.0 && ((1.0..=500.0).contains(&t.size) || kept_size)) {
+                 return Err(EditError::Invalid("the font size must be between 1 and 500 points".into()));
+             }
+-            if (r[2] - r[0]).abs() < 1.0 {
++            if !width.is_finite() || width <= 0.0 || (width < 1.0 && !kept_width) {
+                 return Err(EditError::Invalid("the text box is too narrow".into()));
+             }
+         }
+         Content::Image(_) => {
+-            if (r[2] - r[0]).abs() < 1.0 || (r[3] - r[1]).abs() < 1.0 {
++            let height = (r[3] - r[1]).abs();
++            let kept_height = old_rect.is_some_and(|old| preserved_extent(height, (old[3] - old[1]).abs()));
++            if !width.is_finite()
++                || !height.is_finite()
++                || width <= 0.0
++                || height <= 0.0
++                || (width < 1.0 && !kept_width)
++                || (height < 1.0 && !kept_height)
++            {
+                 return Err(EditError::Invalid("the image is too small".into()));
+             }
+         }
+@@ -732,8 +763,9 @@ fn validate(c: &Content) -> Result<(), EditError> {
+ }
+ 
+ /// Write an item's stream (new, or replacing `obj`) and make its resources available to the page.
+-fn write(doc: &mut Document, page: usize, c: &Content, obj: Option<ObjRef>) -> Result<ObjRef, EditError> {
+-    validate(c)?;
++fn write(doc: &mut Document, page: usize, c: &Content, previous: Option<&Added>) -> Result<ObjRef, EditError> {
++    validate(c, previous.map(|a| &a.content))?;
++    let obj = previous.map(|a| a.obj);
+     let all = page_list(doc);
+     check(&[page], all.len())?;
+     let p = &all[page];
+@@ -823,7 +855,7 @@ pub fn update_content(doc: &mut Document, page: usize, index: usize, c: &Content
+     if std::mem::discriminant(&a.content) != std::mem::discriminant(c) {
+         return Err(EditError::Invalid("an item can't change between text and image".into()));
+     }
+-    write(doc, page, c, Some(a.obj))?;
++    write(doc, page, c, Some(&a))?;
+     Ok(())
+ }
+ 
+diff --git a/crates/edit/src/tests.rs b/crates/edit/src/tests.rs
+index d8c9155..ab1772c 100644
+--- a/crates/edit/src/tests.rs
++++ b/crates/edit/src/tests.rs
+@@ -1399,3 +1399,171 @@ fn picture_marks_preserve_subpoint_user_unit_placement_after_save() {
+         }
+     }
+ }
++
++// Reconstruct original writer metadata/paint at unit 1, then give the page its physical scale.
++fn legacy_added_dimension_fixture(unit: f64) -> Document {
++    let mut doc = fixture();
++    let rect = [0.3, 5.0, 40.3, 20.0];
++    add_content(&mut doc, 2, &Content::Text(AddedText { rect, text: "xs".into(), ..AddedText::default() })).unwrap();
++    let mut image = Dict::new();
++    image.set(b"Subtype".to_vec(), Object::name("Image"));
++    image.set(b"Width".to_vec(), Object::Int(1));
++    image.set(b"Height".to_vec(), Object::Int(1));
++    image.set(b"ColorSpace".to_vec(), Object::name("DeviceGray"));
++    image.set(b"BitsPerComponent".to_vec(), Object::Int(8));
++    let image = doc.add(Object::Stream(Stream::from_raw(image, vec![128])));
++    add_content(&mut doc, 2, &Content::Image(AddedImage::new(rect, image))).unwrap();
++    for item in list_added(&doc) {
++        let Object::Stream(mut stream) = (*doc.get(item.obj)).clone() else { panic!("added stream") };
++        let mut metadata = stream.dict.get(b"PCAdded").unwrap().as_dict().unwrap().clone();
++        metadata.remove(b"UserUnit");
++        stream.dict.set(b"PCAdded".to_vec(), Object::Dict(metadata));
++        doc.set(item.obj, Object::Stream(stream));
++    }
++    let page = pdfcraft_model::pages(&doc)[2].obj;
++    doc.update_dict(page, |d| d.set(b"UserUnit".to_vec(), Object::Real(unit))).unwrap();
++    reopen(&doc)
++}
++
++fn assert_added_dimension_paint(doc: &Document, index: usize, expected: &Content) {
++    let item = &list_added(doc)[index];
++    let object = doc.get(item.obj);
++    let Object::Stream(stream) = &*object else { panic!("added stream") };
++    let bytes = stream.decoded().unwrap();
++    let parsed = pdfcraft_content::parse(&bytes);
++    assert_eq!(parsed.skipped, 0);
++    let unit = pdfcraft_model::pages(doc)[2].user_unit(doc);
++    let matrix = parsed.ops.iter().find(|op| op.is("cm")).unwrap().nums::<6>().unwrap();
++    let close = |actual: f64, expected: f64| {
++        assert!((actual - expected).abs() <= expected.abs().max(1e-12) * 1e-12, "{actual} != {expected}");
++    };
++    // These fixtures are upright; composing page UserUnit and the saved outer matrix restores
++    // physical display coordinates, even when individual PDF operands are far below .001.
++    let scale = unit * matrix[0];
++    match expected {
++        Content::Text(t) => {
++            let tm = parsed.ops.iter().find(|op| op.is("Tm")).unwrap().nums::<6>().unwrap();
++            let font = parsed.ops.iter().find(|op| op.is("Tf")).unwrap().num(1).unwrap();
++            close(scale * font, t.size);
++            close(scale * tm[4], t.rect[0]);
++            close(scale * tm[5], t.rect[3] - 0.95 * t.size);
++            assert!(String::from_utf8(bytes).unwrap().contains(&format!("({}) Tj", t.text)));
++        }
++        Content::Image(i) => {
++            let clip = parsed.ops.iter().find(|op| op.is("re")).unwrap().nums::<4>().unwrap();
++            for (actual, expected) in clip.into_iter().zip([i.rect[0], i.rect[1], i.rect[2] - i.rect[0], i.rect[3] - i.rect[1]]) {
++                close(scale * actual, expected);
++            }
++            let inner = parsed.ops.iter().filter(|op| op.is("cm")).nth(1).unwrap().nums::<6>().unwrap();
++            close(scale * inner[0], (i.rect[2] - i.rect[0]) * if i.flip_h { -1.0 } else { 1.0 });
++            close(scale * inner[3], i.rect[3] - i.rect[1]);
++            close(scale * inner[4], if i.flip_h { i.rect[2] } else { i.rect[0] });
++            close(scale * inner[5], i.rect[1]);
++        }
++    }
++}
++
++fn check_legacy_added_text_dimensions(unit: f64) {
++    let mut doc = legacy_added_dimension_fixture(unit);
++    let Content::Text(mut text) = list_added(&doc)[0].content.clone() else { panic!("text") };
++    let original = text.clone();
++    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
++    text.text = "sx".into(); // Same glyph advances: this edit preserves wrapping and height.
++    update_content(&mut doc, 2, 0, &Content::Text(text.clone())).unwrap();
++    doc = reopen(&doc);
++    let Content::Text(saved) = list_added(&doc)[0].content.clone() else { panic!("text") };
++    assert_eq!((saved.text.as_str(), saved.size), (text.text.as_str(), text.size));
++    for (actual, expected) in saved.rect.into_iter().zip(text.rect) {
++        assert!((actual - expected).abs() <= expected.abs() * 1e-12);
++    }
++    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
++    let obj = doc.get(list_added(&doc)[0].obj);
++    assert!(obj.as_dict().unwrap().get(b"PCAdded").unwrap().as_dict().unwrap().contains(b"UserUnit"));
++    let scale = pdfcraft_model::pages(&doc)[2].user_unit(&doc);
++    for (coordinate, delta) in text.rect.iter_mut().zip([7.3, 4.7, 7.3, 4.7]) {
++        *coordinate += delta * scale;
++    }
++    if unit == 0.01 {
++        assert_ne!(text.rect[2] - text.rect[0], original.rect[2] - original.rect[0], "ordinary translation changes subtraction rounding");
++    }
++    update_content(&mut doc, 2, 0, &Content::Text(text)).unwrap();
++    doc = reopen(&doc);
++    let Content::Text(mut text) = list_added(&doc)[0].content.clone() else { panic!("text") };
++    assert_eq!(text.size, original.size);
++    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
++    text.text = "xs".into();
++    update_content(&mut doc, 2, 0, &Content::Text(text.clone())).unwrap();
++    assert_added_dimension_paint(&reopen(&doc), 0, &Content::Text(text));
++}
++
++fn check_legacy_added_image_dimensions(unit: f64) {
++    let mut doc = legacy_added_dimension_fixture(unit);
++    let Content::Image(mut image) = list_added(&doc)[1].content.clone() else { panic!("image") };
++    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
++    image.flip_h = true;
++    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
++    doc = reopen(&doc);
++    assert_eq!(list_added(&doc)[1].content, Content::Image(image.clone()));
++    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
++    let scale = pdfcraft_model::pages(&doc)[2].user_unit(&doc);
++    for (coordinate, delta) in image.rect.iter_mut().zip([7.3, 4.7, 7.3, 4.7]) {
++        *coordinate += delta * scale;
++    }
++    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
++    doc = reopen(&doc);
++    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
++    image.flip_h = false;
++    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
++    assert_added_dimension_paint(&reopen(&doc), 1, &Content::Image(image));
++}
++
++#[test]
++fn legacy_added_dimension_updates_large_text() {
++    check_legacy_added_text_dimensions(100.0);
++}
++
++#[test]
++fn legacy_added_dimension_updates_small_text() {
++    check_legacy_added_text_dimensions(0.01);
++}
++
++#[test]
++fn legacy_added_dimension_updates_tiny_paint() {
++    check_legacy_added_text_dimensions(0.000001);
++    check_legacy_added_image_dimensions(0.000001);
++}
++
++#[test]
++fn legacy_added_dimension_updates_small_images() {
++    check_legacy_added_image_dimensions(0.01);
++}
++
++#[test]
++fn legacy_added_dimension_updates_reject_new_and_resized() {
++    for unit in [0.01, 100.0] {
++        let mut doc = legacy_added_dimension_fixture(unit);
++        let before = streams(&doc, 2);
++        let Content::Text(text) = list_added(&doc)[0].content.clone() else { panic!("text") };
++        assert!(add_content(&mut doc, 2, &Content::Text(text.clone())).is_err(), "new text keeps authoring size limits");
++        for size in [text.size * 2.0, 0.0, -1.0, f64::NAN, f64::INFINITY] {
++            assert!(update_content(&mut doc, 2, 0, &Content::Text(AddedText { size, ..text.clone() })).is_err());
++        }
++        if unit < 1.0 {
++            let Content::Image(image) = list_added(&doc)[1].content.clone() else { panic!("image") };
++            assert!(add_content(&mut doc, 2, &Content::Image(image.clone())).is_err(), "new image keeps authoring extent limits");
++            for width in [(text.rect[2] - text.rect[0]) / 2.0, 0.0, f64::NAN, f64::INFINITY] {
++                let mut resized = text.clone();
++                resized.rect[2] = resized.rect[0] + width;
++                assert!(update_content(&mut doc, 2, 0, &Content::Text(resized)).is_err(), "changed text width remains bounded");
++            }
++            for axis in [0, 1] {
++                for extent in [(image.rect[axis + 2] - image.rect[axis]) / 2.0, 0.0, f64::NAN, f64::INFINITY] {
++                    let mut resized = image.clone();
++                    resized.rect[axis + 2] = resized.rect[axis] + extent;
++                    assert!(update_content(&mut doc, 2, 1, &Content::Image(resized)).is_err(), "changed image extent remains bounded");
++                }
++            }
++        }
++        assert_eq!(streams(&doc, 2), before, "refused edits leave existing content intact");
++    }
++}

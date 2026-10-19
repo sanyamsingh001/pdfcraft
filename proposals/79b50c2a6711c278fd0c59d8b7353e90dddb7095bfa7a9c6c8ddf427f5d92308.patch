@@ -1,0 +1,62 @@
+diff --git a/crates/ui-egui/tests/editing.rs b/crates/ui-egui/tests/editing.rs
+index 56e7cce3..8ecc9845 100644
+--- a/crates/ui-egui/tests/editing.rs
++++ b/crates/ui-egui/tests/editing.rs
+@@ -50,6 +50,39 @@ fn harness(pages: usize, setup: impl FnOnce(&mut PdfCraftApp) + 'static) -> Harn
+     h
+ }
+ 
++/// Advance the live native open worker until this fixture is admitted, without retrying input.
++fn wait_for_open_document(h: &mut Harness<'static, PdfCraftApp>, name: &str, allow_initial_password_prompt: bool) {
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
++    loop {
++        let app = h.state();
++        let opened = app.active.and_then(|index| app.views.get(index)).and_then(|view| app.session.get(view.id));
++        if opened.is_some_and(|doc| doc.name == name && doc.path.is_none()) && app.password_prompt.is_none() {
++            return;
++        }
++        assert!(
++            app.password_prompt
++                .as_ref()
++                .is_none_or(|prompt| { allow_initial_password_prompt && prompt.name == name && prompt.path.is_none() && prompt.error.is_none() }),
++            "unexpected password prompt or rejected password for {name}"
++        );
++        assert!(
++            app.toast.as_ref().is_none_or(|toast| !toast.0.starts_with("Couldn't open") && !toast.0.starts_with("Couldn't read")),
++            "fixture failed to open: {:?}",
++            app.toast
++        );
++        assert!(
++            std::time::Instant::now() < deadline,
++            "{name} did not become active: active {:?}, tabs {}, password prompt {}, toast {:?}",
++            app.active,
++            app.views.len(),
++            app.password_prompt.is_some(),
++            app.toast
++        );
++        h.run_steps(1);
++        std::thread::yield_now();
++    }
++}
++
+ fn organize(pages: usize) -> Harness<'static, PdfCraftApp> {
+     harness(pages, |app| app.set_option("organize", "on").unwrap())
+ }
+@@ -1671,7 +1704,7 @@ fn files_dropped_before_the_pointer_is_known_wait_for_it() {
+ fn files_dropped_outside_the_page_grid_still_open_as_documents() {
+     let mut h = harness(2, |_| {});
+     drop_files(&mut h, vec![Dropped("other.pdf", fixture(1))]);
+-    h.run_steps(3);
++    wait_for_open_document(&mut h, "other.pdf", false);
+     assert_eq!(h.state().views.len(), 2);
+     assert_eq!(texts_of(h.state(), 0), ["Page 1", "Page 2"]);
+ }
+@@ -1907,7 +1940,7 @@ fn password_prompt_opens_and_security_tab_reports_the_details() {
+     field.type_text("pw");
+     h.run_steps(2);
+     h.key_press(Key::Enter);
+-    h.run_steps(4);
++    wait_for_open_document(&mut h, "secret.pdf", true);
+     assert_eq!(h.state().views.len(), 1);
+     h.state_mut().set_option("dialog", "properties").unwrap();
+     h.run_steps(2);

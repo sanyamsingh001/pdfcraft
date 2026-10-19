@@ -1,0 +1,35 @@
+diff --git a/crates/ui-egui/tests/ui.rs b/crates/ui-egui/tests/ui.rs
+index cef2bcae..857e6ca5 100644
+--- a/crates/ui-egui/tests/ui.rs
++++ b/crates/ui-egui/tests/ui.rs
+@@ -655,7 +655,29 @@ fn dropping_a_pdf_on_the_window_opens_it() {
+     assert!(h.state().views.is_empty());
+     let file: egui::DroppedFileHandle = std::sync::Arc::new(Dropped { path: "dropped.pdf".into(), bytes: FIXTURE.to_vec() });
+     h.input_mut().dropped_files.push(file);
+-    h.run_steps(3);
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
++    loop {
++        let app = h.state();
++        let opened = app.active.and_then(|index| app.views.get(index)).and_then(|view| app.session.get(view.id));
++        assert!(app.password_prompt.is_none(), "the original unencrypted drop asked for a password");
++        assert!(
++            app.toast.as_ref().is_none_or(|toast| !toast.0.starts_with("Couldn't open") && !toast.0.starts_with("Couldn't read")),
++            "the dropped file failed to open: {:?}",
++            app.toast
++        );
++        if opened.is_some_and(|doc| doc.name == "dropped.pdf" && doc.path.is_none() && doc.bytes.as_slice() == FIXTURE) {
++            break;
++        }
++        assert!(
++            std::time::Instant::now() < deadline,
++            "the original dropped file did not become active: active {:?}, tabs {}, toast {:?}",
++            app.active,
++            app.views.len(),
++            app.toast
++        );
++        h.run_steps(1);
++        std::thread::yield_now();
++    }
+     assert_eq!(h.state().views.len(), 1, "the dropped PDF opens in a tab");
+     h.get_by_label_contains("dropped.pdf");
+ }

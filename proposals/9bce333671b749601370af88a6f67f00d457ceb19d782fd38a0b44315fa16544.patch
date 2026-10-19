@@ -1,0 +1,1832 @@
+diff --git a/crates/edit/src/added.rs b/crates/edit/src/added.rs
+index 6537f92..0f0da2d 100644
+--- a/crates/edit/src/added.rs
++++ b/crates/edit/src/added.rs
+@@ -13,7 +13,7 @@ use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
+ use pdfcraft_fonts::{GlyphError, GlyphOutline, ShapedCluster, arabic_glyph, helvetica_width, literal, shape_arabic, win_ansi};
+ use unicode_bidi::{Level, ParagraphBidiInfo};
+ 
+-use crate::{EditError, check, contents, n, page_list, place_tagged};
++use crate::{EditError, check, contents, matrix_number, n, page_list, place_tagged};
+ 
+ const TAG: &str = "Added";
+ 
+@@ -413,7 +413,16 @@ fn draw_arabic(doc: &mut Document, t: &AddedText, latin: &str, taken: &Dict, fon
+         for piece in pieces {
+             match piece {
+                 Piece::Latin(s) => {
+-                    out.extend(format!("/{latin} {} Tf {} Tw 1 0 0 1 {} {} Tm ", n(t.size), n(tw), n(pen), n(y)).bytes());
++                    out.extend(
++                        format!(
++                            "/{latin} {} Tf {} Tw 1 0 0 1 {} {} Tm ",
++                            matrix_number(t.size),
++                            matrix_number(tw),
++                            matrix_number(pen),
++                            matrix_number(y)
++                        )
++                        .bytes(),
++                    );
+                     out.extend(literal(&win_ansi(s)));
+                     out.extend_from_slice(b" Tj\n");
+                     current = Some(latin);
+@@ -426,10 +435,10 @@ fn draw_arabic(doc: &mut Document, t: &AddedText, latin: &str, taken: &Dict, fon
+                         // Codes start at 1; k % 240 + 1 is at most 240.
+                         let code = u8::try_from(k % GLYPHS_PER_FONT + 1).unwrap_or(1);
+                         if current != Some(name.as_str()) {
+-                            out.extend(format!("/{name} {} Tf ", n(t.size)).bytes());
++                            out.extend(format!("/{name} {} Tf ", matrix_number(t.size)).bytes());
+                             current = Some(name.as_str());
+                         }
+-                        out.extend(format!("1 0 0 1 {} {} Tm ", n(pen), n(y)).bytes());
++                        out.extend(format!("1 0 0 1 {} {} Tm ", matrix_number(pen), matrix_number(y)).bytes());
+                         out.extend(literal(&[code]));
+                         out.extend_from_slice(b" Tj\n");
+                         pen += c.advance * t.size + if c.text == " " { tw } else { 0.0 };
+@@ -533,7 +542,16 @@ fn type3_arabic(doc: &mut Document, clusters: &[&ShapedCluster], outlines: &Hash
+ /// keeps drawing its Arabic as `?`, as before Arabic was supported, rather than refusing to move it.
+ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing: bool) -> Result<(Vec<u8>, Dict), EditError> {
+     let mut res = Dict::new();
+-    let mut out = format!("q {} {} {} {} {} {} cm\n", n(view[0]), n(view[1]), n(view[2]), n(view[3]), n(view[4]), n(view[5])).into_bytes();
++    let mut out = format!(
++        "q {} {} {} {} {} {} cm\n",
++        matrix_number(view[0]),
++        matrix_number(view[1]),
++        matrix_number(view[2]),
++        matrix_number(view[3]),
++        matrix_number(view[4]),
++        matrix_number(view[5])
++    )
++    .into_bytes();
+     match c {
+         Content::Text(t) => {
+             let base = t.family.base_font(t.bold, t.italic);
+@@ -556,7 +574,7 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
+             res.set(b"Font".to_vec(), Object::Dict(fonts));
+             let r = text_rect(t);
+             let [cr, cg, cb] = t.color.map(|v| v.clamp(0.0, 1.0));
+-            out.extend(format!("BT /{name} {} Tf {} {} {} rg\n", n(t.size), n(cr), n(cg), n(cb)).bytes());
++            out.extend(format!("BT /{name} {} Tf {} {} {} rg\n", matrix_number(t.size), n(cr), n(cg), n(cb)).bytes());
+             for (i, line) in lines(t).iter().enumerate() {
+                 let w = t.family.width(line, t.size, t.bold);
+                 let x = match t.align {
+@@ -571,7 +589,7 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
+                 let spaces = line.matches(' ').count();
+                 let tw =
+                     if t.align == Align::Justify && i + 1 < all.len() && spaces > 0 { ((r[2] - r[0]) - w).max(0.0) / spaces as f64 } else { 0.0 };
+-                out.extend(format!("1 0 0 1 {} {} Tm {} Tw ", n(x), n(y), n(tw)).bytes());
++                out.extend(format!("1 0 0 1 {} {} Tm {} Tw ", matrix_number(x), matrix_number(y), matrix_number(tw)).bytes());
+                 out.extend(literal(&win_ansi(line)));
+                 out.extend_from_slice(b" Tj\n");
+             }
+@@ -591,16 +609,16 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
+             out.extend(
+                 format!(
+                     "{} {} {} {} re W n {} {} {} {} {} {} cm /{name} Do\n",
+-                    n(r[0]),
+-                    n(r[1]),
+-                    n(r[2] - r[0]),
+-                    n(r[3] - r[1]),
+-                    n(a),
+-                    n(b),
+-                    n(c),
+-                    n(d),
+-                    n(e),
+-                    n(f)
++                    matrix_number(r[0]),
++                    matrix_number(r[1]),
++                    matrix_number(r[2] - r[0]),
++                    matrix_number(r[3] - r[1]),
++                    matrix_number(a),
++                    matrix_number(b),
++                    matrix_number(c),
++                    matrix_number(d),
++                    matrix_number(e),
++                    matrix_number(f)
+                 )
+                 .bytes(),
+             );
+@@ -610,8 +628,9 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
+     Ok((out, res))
+ }
+ 
+-fn params(c: &Content) -> Dict {
++fn params(c: &Content, unit: f64) -> Dict {
+     let mut d = Dict::new();
++    d.set(b"UserUnit".to_vec(), Object::Real(unit));
+     let arr = |v: &[f64]| Object::Array(v.iter().map(|x| Object::Real(*x)).collect());
+     match c {
+         Content::Text(t) => {
+@@ -652,9 +671,14 @@ fn params(c: &Content) -> Dict {
+     d
+ }
+ 
+-fn parse(doc: &Document, d: &Dict) -> Option<Content> {
++fn parse(doc: &Document, d: &Dict, current_unit: f64) -> Option<Content> {
++    // Older writers stored raw display units; new writers record their physical-point scale.
++    let stored_unit = d.get(b"UserUnit").and_then(|o| doc.resolve(o).as_f64()).unwrap_or(1.0) as f32;
++    let stored_unit = if stored_unit.is_finite() && stored_unit > 0.0 && stored_unit <= 75_000.0 { stored_unit as f64 } else { 1.0 };
++    let ratio = current_unit / stored_unit;
+     let r = nums(doc, d.get(b"Rect"));
+     let rect: [f64; 4] = r.try_into().ok()?;
++    let rect = rect.map(|v| v * ratio);
+     match d.name(b"Kind")? {
+         b"Text" => {
+             let (family, bold, italic) = Family::from_base(d.name(b"Font").unwrap_or(b"Helvetica"));
+@@ -665,7 +689,7 @@ fn parse(doc: &Document, d: &Dict) -> Option<Content> {
+                 family,
+                 bold,
+                 italic,
+-                size: d.get(b"Size").and_then(Object::as_f64).unwrap_or(12.0),
++                size: d.get(b"Size").and_then(Object::as_f64).unwrap_or(12.0) * ratio,
+                 color: if c.len() == 3 { [c[0], c[1], c[2]] } else { [0.0; 3] },
+                 align: match d.int(b"Align") {
+                     Some(1) => Align::Center,
+@@ -690,25 +714,47 @@ fn parse(doc: &Document, d: &Dict) -> Option<Content> {
+     }
+ }
+ 
+-fn validate(c: &Content) -> Result<(), EditError> {
++// Translation can change a subtracted extent by a few ulps. Compare dimensions only, so
++// large coordinates never widen the exception for a genuinely resized item.
++fn preserved_extent(value: f64, previous: f64) -> bool {
++    value.is_finite()
++        && value > 0.0
++        && previous.is_finite()
++        && previous > 0.0
++        && (value - previous).abs() <= value.max(previous) * (8.0 * f64::EPSILON)
++}
++
++fn validate(c: &Content, previous: Option<&Content>) -> Result<(), EditError> {
+     let r = c.rect();
+     if !r.iter().all(|v| v.is_finite()) {
+         return Err(EditError::Invalid("invalid position".into()));
+     }
++    let width = (r[2] - r[0]).abs();
++    let old_rect = previous.map(Content::rect);
++    let kept_width = old_rect.is_some_and(|old| preserved_extent(width, (old[2] - old[0]).abs()));
+     match c {
+         Content::Text(t) => {
+             if t.text.trim().is_empty() {
+                 return Err(EditError::Invalid("type some text first".into()));
+             }
+-            if !(t.size.is_finite() && (1.0..=500.0).contains(&t.size)) {
++            let kept_size = matches!(previous, Some(Content::Text(old)) if t.size == old.size);
++            if !(t.size.is_finite() && t.size > 0.0 && ((1.0..=500.0).contains(&t.size) || kept_size)) {
+                 return Err(EditError::Invalid("the font size must be between 1 and 500 points".into()));
+             }
+-            if (r[2] - r[0]).abs() < 1.0 {
++            if !width.is_finite() || width <= 0.0 || (width < 1.0 && !kept_width) {
+                 return Err(EditError::Invalid("the text box is too narrow".into()));
+             }
+         }
+         Content::Image(_) => {
+-            if (r[2] - r[0]).abs() < 1.0 || (r[3] - r[1]).abs() < 1.0 {
++            let height = (r[3] - r[1]).abs();
++            let kept_height = old_rect.is_some_and(|old| preserved_extent(height, (old[3] - old[1]).abs()));
++            if !width.is_finite()
++                || !height.is_finite()
++                || width <= 0.0
++                || height <= 0.0
++                || (width < 1.0 && !kept_width)
++                || (height < 1.0 && !kept_height)
++            {
+                 return Err(EditError::Invalid("the image is too small".into()));
+             }
+         }
+@@ -717,8 +763,9 @@ fn validate(c: &Content) -> Result<(), EditError> {
+ }
+ 
+ /// Write an item's stream (new, or replacing `obj`) and make its resources available to the page.
+-fn write(doc: &mut Document, page: usize, c: &Content, obj: Option<ObjRef>) -> Result<ObjRef, EditError> {
+-    validate(c)?;
++fn write(doc: &mut Document, page: usize, c: &Content, previous: Option<&Added>) -> Result<ObjRef, EditError> {
++    validate(c, previous.map(|a| &a.content))?;
++    let obj = previous.map(|a| a.obj);
+     let all = page_list(doc);
+     check(&[page], all.len())?;
+     let p = &all[page];
+@@ -741,7 +788,7 @@ fn write(doc: &mut Document, page: usize, c: &Content, obj: Option<ObjRef>) -> R
+     doc.update_dict(p.obj, |d| d.set(b"Resources".to_vec(), Object::Dict(pres)))?;
+     let mut sd = Dict::new();
+     sd.set(b"PCMark".to_vec(), Object::name(TAG));
+-    sd.set(b"PCAdded".to_vec(), Object::Dict(params(c)));
++    sd.set(b"PCAdded".to_vec(), Object::Dict(params(c, p.user_unit(doc))));
+     let stream = Stream::flate(sd, &content);
+     match obj {
+         Some(r) => {
+@@ -778,7 +825,9 @@ pub fn list_added(doc: &Document) -> Vec<Added> {
+             if d.name(b"PCMark") != Some(TAG.as_bytes()) {
+                 continue;
+             }
+-            if let Some(c) = d.get(b"PCAdded").and_then(|p| doc.resolve(p).as_dict().cloned()).and_then(|p| parse(doc, &p)) {
++            if let Some(c) =
++                d.get(b"PCAdded").and_then(|p| doc.resolve(p).as_dict().cloned()).and_then(|metadata| parse(doc, &metadata, p.user_unit(doc)))
++            {
+                 out.push(Added { page: pi, obj: r, content: c });
+             }
+         }
+@@ -806,7 +855,7 @@ pub fn update_content(doc: &mut Document, page: usize, index: usize, c: &Content
+     if std::mem::discriminant(&a.content) != std::mem::discriminant(c) {
+         return Err(EditError::Invalid("an item can't change between text and image".into()));
+     }
+-    write(doc, page, c, Some(a.obj))?;
++    write(doc, page, c, Some(&a))?;
+     Ok(())
+ }
+ 
+diff --git a/crates/edit/src/lib.rs b/crates/edit/src/lib.rs
+index 7950184..4c992ab 100644
+--- a/crates/edit/src/lib.rs
++++ b/crates/edit/src/lib.rs
+@@ -146,11 +146,11 @@ fn picture(src: &MarkSource, page: (f64, f64), scale: f64, rotation: f64, offset
+     let (cx, cy) = (w / 2.0 + offset[0], h / 2.0 + offset[1]);
+     // Centre, rotate, then place the picture's box (unit square for images).
+     let place = if src.image {
+-        format!("{} 0 0 {} {} {} cm", n(dw), n(dh), n(-dw / 2.0), n(-dh / 2.0))
++        format!("{} 0 0 {} {} {} cm", matrix_number(dw), matrix_number(dh), matrix_number(-dw / 2.0), matrix_number(-dh / 2.0))
+     } else {
+-        format!("{} 0 0 {} {} {} cm", n(k), n(k), n(-dw / 2.0), n(-dh / 2.0))
++        format!("{} 0 0 {} {} {} cm", matrix_number(k), matrix_number(k), matrix_number(-dw / 2.0), matrix_number(-dh / 2.0))
+     };
+-    format!("{} {} {} {} {} {} cm\n{place}\n/PCPic{} Do\n", n(c), n(s), n(-s), n(c), n(cx), n(cy), src.xobject.num)
++    format!("{} {} {} {} {} {} cm\n{place}\n/PCPic{} Do\n", n(c), n(s), n(-s), n(c), matrix_number(cx), matrix_number(cy), src.xobject.num)
+ }
+ 
+ /// Register a mark picture in the page's own resources (`/PCPic<num>`).
+@@ -171,6 +171,13 @@ pub struct Context {
+     pub date: (i64, u32, u32),
+ }
+ 
++// Model-derived transforms can contain tiny scale factors; retain their PDF decimal precision.
++fn matrix_number(value: f64) -> String {
++    let mut bytes = Vec::new();
++    pdfcraft_cos::serialize(&Object::Real(value), &mut bytes);
++    String::from_utf8_lossy(&bytes).into_owned()
++}
++
+ fn n(v: f64) -> String {
+     let s = format!("{:.3}", if v.abs() < 5e-4 { 0.0 } else { v });
+     let s = s.trim_end_matches('0').trim_end_matches('.');
+@@ -364,12 +371,12 @@ fn begin(kind: MarkKind, subtype: &str, matrix: [f64; 6]) -> String {
+     format!(
+         "q\n/Artifact <</Type /Pagination /Subtype /{subtype} /PCMark /{}>> BDC\n{} {} {} {} {} {} cm\n",
+         kind.tag(),
+-        n(matrix[0]),
+-        n(matrix[1]),
+-        n(matrix[2]),
+-        n(matrix[3]),
+-        n(matrix[4]),
+-        n(matrix[5])
++        matrix_number(matrix[0]),
++        matrix_number(matrix[1]),
++        matrix_number(matrix[2]),
++        matrix_number(matrix[3]),
++        matrix_number(matrix[4]),
++        matrix_number(matrix[5])
+     )
+ }
+ 
+@@ -526,7 +533,13 @@ pub fn add_background(doc: &mut Document, pages: &[usize], bg: &Background, repl
+                 content.push_str(&format!("/PCGS{} gs\n", (opacity * 100.0).round() as i64));
+                 content.push_str(&picture(src, (w, h), bg.scale, 0.0, [0.0; 2]));
+             }
+-            None => content.push_str(&format!("/PCGS{} gs\n{}\n0 0 {} {} re f\n", (opacity * 100.0).round() as i64, rgb(bg.color), n(w), n(h))),
++            None => content.push_str(&format!(
++                "/PCGS{} gs\n{}\n0 0 {} {} re f\n",
++                (opacity * 100.0).round() as i64,
++                rgb(bg.color),
++                matrix_number(w),
++                matrix_number(h)
++            )),
+         }
+         content.push_str(END);
+         add_resources(doc, &page, Some(opacity), None)?;
+diff --git a/crates/edit/src/tests.rs b/crates/edit/src/tests.rs
+index 3896b83..ab1772c 100644
+--- a/crates/edit/src/tests.rs
++++ b/crates/edit/src/tests.rs
+@@ -1194,3 +1194,376 @@ fn the_graphics_state_carries_over_between_content_streams() {
+     let l = &text::text_lines(&doc, 0).unwrap()[0];
+     assert!(close(l.rect[0], 100.0) && close(l.size, 10.0), "{l:?}");
+ }
++
++#[test]
++fn page_marks_and_added_content_preserve_fractional_user_unit_matrices() {
++    for rotation in [0, 90] {
++        let mut doc = fixture();
++        let page = pdfcraft_model::pages(&doc)[2].obj;
++        doc.update_dict(page, |d| {
++            let bounds = Object::Array([0.0, 0.0, 0.1, 0.1].into_iter().map(Object::Real).collect());
++            d.set(b"MediaBox".to_vec(), bounds.clone());
++            d.set(b"CropBox".to_vec(), bounds);
++            d.set(b"UserUnit".to_vec(), Object::Int(4096));
++            d.set(b"Rotate".to_vec(), Object::Int(rotation));
++        })
++        .unwrap();
++        let mut hf = HeaderFooter::default();
++        hf.text[0] = "Matrix header".into();
++        add_header_footer(&mut doc, &[2], &hf, false, &cx()).unwrap();
++        let text = AddedText { rect: [72.0, 100.0, 200.0, 144.0], text: "Matrix text".into(), size: 12.0, ..AddedText::default() };
++        add_content(&mut doc, 2, &Content::Text(text)).unwrap();
++        let saved = reopen(&doc);
++        let contents = streams(&saved, 2);
++        for marker in ["/PCMark /HeaderFooter", "(Matrix text) Tj"] {
++            let matching: Vec<_> = contents.iter().filter(|s| s.contains(marker)).collect();
++            assert_eq!(matching.len(), 1, "{contents:?}");
++            let stream = matching[0];
++            let parsed = pdfcraft_content::parse(stream.as_bytes());
++            assert_eq!(parsed.skipped, 0);
++            let cm = parsed.ops.iter().find(|op| op.is("cm")).unwrap();
++            assert_eq!(cm.operands.len(), 6);
++            assert!(!stream[cm.span.clone()].contains('e') && !stream[cm.span.clone()].contains('E'), "PDF numbers cannot use exponents");
++            let matrix = cm.nums::<6>().unwrap();
++            let expected = if rotation == 0 {
++                [0.000244140625, 0.0, 0.0, 0.000244140625, 0.0, 0.0]
++            } else {
++                [0.0, 0.000244140625, -0.000244140625, 0.0, 0.1, 0.0]
++            };
++            assert_eq!(matrix, expected, "rotation={rotation}, stream={stream}");
++            // A fixed physical display point must remain at its intended raw page position.
++            let raw = [matrix[0] * 72.0 + matrix[2] * 144.0 + matrix[4], matrix[1] * 72.0 + matrix[3] * 144.0 + matrix[5]];
++            let expected_raw = if rotation == 0 { [0.017578125, 0.03515625] } else { [0.06484375, 0.017578125] };
++            for (actual, expected) in raw.into_iter().zip(expected_raw) {
++                assert!((actual - expected).abs() < 1e-12);
++            }
++        }
++    }
++}
++
++#[test]
++fn legacy_added_items_match_painted_physical_geometry_after_text_only_update() {
++    let paint = |doc: &Document, obj, size: f64, baseline: [f64; 2], text: &str| {
++        let object = doc.get(obj);
++        let Object::Stream(stream) = &*object else { panic!("added text stream") };
++        let bytes = stream.decoded().unwrap();
++        let parsed = pdfcraft_content::parse(&bytes);
++        assert_eq!(parsed.skipped, 0);
++        let matrix = parsed.ops.iter().find(|op| op.is("cm")).unwrap().nums::<6>().unwrap();
++        let tm = parsed.ops.iter().find(|op| op.is("Tm")).unwrap().nums::<6>().unwrap();
++        let font = parsed.ops.iter().find(|op| op.is("Tf")).unwrap().num(1).unwrap();
++        assert_eq!(2.0 * matrix[0] * font, size, "actual physical painted font size");
++        let actual = [2.0 * (matrix[0] * tm[4] + matrix[2] * tm[5] + matrix[4]), 2.0 * (matrix[1] * tm[4] + matrix[3] * tm[5] + matrix[5])];
++        for (actual, expected) in actual.into_iter().zip(baseline) {
++            assert!((actual - expected).abs() < 1e-9, "painted baseline: {actual} != {expected}");
++        }
++        assert!(String::from_utf8(bytes).unwrap().contains(&format!("({text}) Tj")));
++    };
++    for legacy in [false, true] {
++        let mut doc = fixture();
++        let page = pdfcraft_model::pages(&doc)[2].obj;
++        doc.update_dict(page, |d| {
++            d.set(b"MediaBox".to_vec(), Object::Array([0.0, 0.0, 300.0, 400.0].into_iter().map(Object::Real).collect()));
++            d.set(b"UserUnit".to_vec(), Object::Int(if legacy { 1 } else { 2 }));
++        })
++        .unwrap();
++        let text = AddedText { rect: [72.0, 100.0, 200.0, 144.0], text: "Matrix text".into(), size: 12.0, ..AddedText::default() };
++        add_content(&mut doc, 2, &Content::Text(text)).unwrap();
++        if legacy {
++            // Reconstruct the old writer shape: identity paint matrix and unmarked raw metadata.
++            // This is original fixture construction, not execution of an old product binary.
++            let obj = list_added(&doc)[0].obj;
++            let Object::Stream(mut stream) = (*doc.get(obj)).clone() else { panic!("added text stream") };
++            let mut metadata = stream.dict.get(b"PCAdded").unwrap().as_dict().unwrap().clone();
++            metadata.remove(b"UserUnit");
++            assert!(!metadata.contains(b"UserUnit"));
++            stream.dict.set(b"PCAdded".to_vec(), Object::Dict(metadata));
++            doc.set(obj, Object::Stream(stream));
++            doc.update_dict(page, |d| d.set(b"UserUnit".to_vec(), Object::Int(2))).unwrap();
++        }
++        let mut saved = reopen(&doc);
++        let size = if legacy { 24.0 } else { 12.0 };
++        let rect = if legacy { [144.0, 259.2, 400.0, 288.0] } else { [72.0, 129.6, 200.0, 144.0] };
++        let baseline = if legacy { [144.0, 265.2] } else { [72.0, 132.6] };
++        let items = list_added(&saved);
++        assert_eq!(items.len(), 1);
++        paint(&saved, items[0].obj, size, baseline, "Matrix text");
++        let Content::Text(mut text) = items[0].content.clone() else { panic!("added text") };
++        assert_eq!(text.size, size, "listed size must agree with actual legacy/new paint");
++        for (actual, expected) in text.rect.into_iter().zip(rect) {
++            assert!((actual - expected).abs() < 1e-9, "selection rectangle: {actual} != {expected}");
++        }
++        // Helvetica x and s have the same advance; change only the text, keeping its placement.
++        text.text = "Matrix test".into();
++        update_content(&mut saved, 2, 0, &Content::Text(text)).unwrap();
++        let reopened = reopen(&saved);
++        let items = list_added(&reopened);
++        assert_eq!(items.len(), 1);
++        let Content::Text(text) = &items[0].content else { panic!("added text") };
++        assert_eq!((text.text.as_str(), text.size), ("Matrix test", size));
++        for (actual, expected) in text.rect.into_iter().zip(rect) {
++            assert!((actual - expected).abs() < 1e-9);
++        }
++        paint(&reopened, items[0].obj, size, baseline, "Matrix test");
++    }
++}
++
++#[test]
++fn solid_background_preserves_subpoint_user_unit_extent_after_save() {
++    let mut doc = fixture();
++    let page = pdfcraft_model::pages(&doc)[2].obj;
++    doc.update_dict(page, |d| {
++        d.set(b"MediaBox".to_vec(), Object::Array([0.0, 0.0, 200.0, 300.0].into_iter().map(Object::Real).collect()));
++        d.set(b"UserUnit".to_vec(), Object::Real(1e-6));
++    })
++    .unwrap();
++    add_background(&mut doc, &[2], &Background::default(), false).unwrap();
++    let saved = reopen(&doc);
++    let contents = streams(&saved, 2);
++    let matching: Vec<_> = contents.iter().filter(|s| s.contains("/PCMark /Background")).collect();
++    assert_eq!(matching.len(), 1);
++    let parsed = pdfcraft_content::parse(matching[0].as_bytes());
++    assert_eq!(parsed.skipped, 0);
++    let matrix = parsed.ops.iter().find(|op| op.is("cm")).unwrap().nums::<6>().unwrap();
++    let rect = parsed.ops.iter().find(|op| op.is("re")).unwrap().nums::<4>().unwrap();
++    assert!(rect[2] > 0.0 && rect[3] > 0.0, "saved background must have nonzero physical extent: {rect:?}");
++    let unit = f64::from(1e-6_f32);
++    for (actual, expected) in rect.into_iter().zip([0.0, 0.0, 200.0 * unit, 300.0 * unit]) {
++        assert!((actual - expected).abs() <= expected.abs() * 1e-12, "physical fill extent: {actual} != {expected}");
++    }
++    for (point, expected) in [([rect[0], rect[1]], [0.0, 0.0]), ([rect[0] + rect[2], rect[1] + rect[3]], [200.0, 300.0])] {
++        let raw = [matrix[0] * point[0] + matrix[2] * point[1] + matrix[4], matrix[1] * point[0] + matrix[3] * point[1] + matrix[5]];
++        for (actual, expected) in raw.into_iter().zip(expected) {
++            assert!((actual - expected).abs() < 1e-9, "painted raw fill extent: {actual} != {expected}");
++        }
++    }
++}
++
++#[test]
++fn picture_marks_preserve_subpoint_user_unit_placement_after_save() {
++    for image in [false, true] {
++        for watermark in [false, true] {
++            let mut doc = image_page();
++            let page = pdfcraft_model::pages(&doc)[0].obj;
++            doc.update_dict(page, |d| {
++                d.set(b"MediaBox".to_vec(), Object::Array([0.0, 0.0, 200.0, 300.0].into_iter().map(Object::Real).collect()));
++                d.set(b"UserUnit".to_vec(), Object::Real(1e-6));
++                d.remove(b"Contents");
++            })
++            .unwrap();
++            let source = if image {
++                let resources = doc.resolve(pdfcraft_model::pages(&doc)[0].dict.get(b"Resources").unwrap());
++                let objects = doc.resolve(resources.as_dict().unwrap().get(b"XObject").unwrap());
++                MarkSource { xobject: objects.as_dict().unwrap().reference(b"Im0").unwrap(), size: (4.0, 2.0), image: true }
++            } else {
++                let mut form = pdfcraft_cos::Dict::new();
++                form.set(b"Type".to_vec(), Object::name("XObject"));
++                form.set(b"Subtype".to_vec(), Object::name("Form"));
++                form.set(b"BBox".to_vec(), Object::Array([0.0, 0.0, 200.0, 300.0].into_iter().map(Object::Real).collect()));
++                form.set(b"Resources".to_vec(), Object::Dict(pdfcraft_cos::Dict::new()));
++                let xobject = doc.add(Object::Stream(pdfcraft_cos::Stream::flate(form, b"0 0 200 300 re f\n")));
++                MarkSource { xobject, size: (200.0, 300.0), image: false }
++            };
++            if watermark {
++                add_watermark(&mut doc, &[0], &Watermark { source: Some(source), scale: 1.0, rotation: 0.0, ..Watermark::default() }, false).unwrap();
++            } else {
++                add_background(&mut doc, &[0], &Background { source: Some(source), ..Background::default() }, false).unwrap();
++            }
++            let saved = reopen(&doc);
++            let contents = streams(&saved, 0);
++            let marker = if watermark { "/PCMark /Watermark" } else { "/PCMark /Background" };
++            let matching: Vec<_> = contents.iter().filter(|s| s.contains(marker)).collect();
++            assert_eq!(matching.len(), 1);
++            let parsed = pdfcraft_content::parse(matching[0].as_bytes());
++            assert_eq!(parsed.skipped, 0);
++            let matrices: Vec<_> = parsed.ops.iter().filter(|op| op.is("cm")).map(|op| op.nums::<6>().unwrap()).collect();
++            assert_eq!(matrices.len(), 3);
++            assert_eq!(parsed.ops.iter().filter(|op| op.is("Do")).count(), 1);
++            let top_right = if image { [1.0, 1.0] } else { [200.0, 300.0] };
++            let painted: Vec<_> = [[0.0, 0.0], top_right]
++                .into_iter()
++                .map(|mut point| {
++                    for m in matrices.iter().rev() {
++                        point = [m[0] * point[0] + m[2] * point[1] + m[4], m[1] * point[0] + m[3] * point[1] + m[5]];
++                    }
++                    point
++                })
++                .collect();
++            assert!(painted[1][0] > painted[0][0] && painted[1][1] > painted[0][1], "saved fitted picture must remain nonzero: {painted:?}");
++            let expected = if image { [[0.0, 100.0], [200.0, 200.0]] } else { [[0.0, 0.0], [200.0, 300.0]] };
++            for (point, expected) in painted.into_iter().zip(expected) {
++                for (actual, expected) in point.into_iter().zip(expected) {
++                    assert!((actual - expected).abs() < 1e-9, "image={image}, watermark={watermark}: {actual} != {expected}");
++                }
++            }
++        }
++    }
++}
++
++// Reconstruct original writer metadata/paint at unit 1, then give the page its physical scale.
++fn legacy_added_dimension_fixture(unit: f64) -> Document {
++    let mut doc = fixture();
++    let rect = [0.3, 5.0, 40.3, 20.0];
++    add_content(&mut doc, 2, &Content::Text(AddedText { rect, text: "xs".into(), ..AddedText::default() })).unwrap();
++    let mut image = Dict::new();
++    image.set(b"Subtype".to_vec(), Object::name("Image"));
++    image.set(b"Width".to_vec(), Object::Int(1));
++    image.set(b"Height".to_vec(), Object::Int(1));
++    image.set(b"ColorSpace".to_vec(), Object::name("DeviceGray"));
++    image.set(b"BitsPerComponent".to_vec(), Object::Int(8));
++    let image = doc.add(Object::Stream(Stream::from_raw(image, vec![128])));
++    add_content(&mut doc, 2, &Content::Image(AddedImage::new(rect, image))).unwrap();
++    for item in list_added(&doc) {
++        let Object::Stream(mut stream) = (*doc.get(item.obj)).clone() else { panic!("added stream") };
++        let mut metadata = stream.dict.get(b"PCAdded").unwrap().as_dict().unwrap().clone();
++        metadata.remove(b"UserUnit");
++        stream.dict.set(b"PCAdded".to_vec(), Object::Dict(metadata));
++        doc.set(item.obj, Object::Stream(stream));
++    }
++    let page = pdfcraft_model::pages(&doc)[2].obj;
++    doc.update_dict(page, |d| d.set(b"UserUnit".to_vec(), Object::Real(unit))).unwrap();
++    reopen(&doc)
++}
++
++fn assert_added_dimension_paint(doc: &Document, index: usize, expected: &Content) {
++    let item = &list_added(doc)[index];
++    let object = doc.get(item.obj);
++    let Object::Stream(stream) = &*object else { panic!("added stream") };
++    let bytes = stream.decoded().unwrap();
++    let parsed = pdfcraft_content::parse(&bytes);
++    assert_eq!(parsed.skipped, 0);
++    let unit = pdfcraft_model::pages(doc)[2].user_unit(doc);
++    let matrix = parsed.ops.iter().find(|op| op.is("cm")).unwrap().nums::<6>().unwrap();
++    let close = |actual: f64, expected: f64| {
++        assert!((actual - expected).abs() <= expected.abs().max(1e-12) * 1e-12, "{actual} != {expected}");
++    };
++    // These fixtures are upright; composing page UserUnit and the saved outer matrix restores
++    // physical display coordinates, even when individual PDF operands are far below .001.
++    let scale = unit * matrix[0];
++    match expected {
++        Content::Text(t) => {
++            let tm = parsed.ops.iter().find(|op| op.is("Tm")).unwrap().nums::<6>().unwrap();
++            let font = parsed.ops.iter().find(|op| op.is("Tf")).unwrap().num(1).unwrap();
++            close(scale * font, t.size);
++            close(scale * tm[4], t.rect[0]);
++            close(scale * tm[5], t.rect[3] - 0.95 * t.size);
++            assert!(String::from_utf8(bytes).unwrap().contains(&format!("({}) Tj", t.text)));
++        }
++        Content::Image(i) => {
++            let clip = parsed.ops.iter().find(|op| op.is("re")).unwrap().nums::<4>().unwrap();
++            for (actual, expected) in clip.into_iter().zip([i.rect[0], i.rect[1], i.rect[2] - i.rect[0], i.rect[3] - i.rect[1]]) {
++                close(scale * actual, expected);
++            }
++            let inner = parsed.ops.iter().filter(|op| op.is("cm")).nth(1).unwrap().nums::<6>().unwrap();
++            close(scale * inner[0], (i.rect[2] - i.rect[0]) * if i.flip_h { -1.0 } else { 1.0 });
++            close(scale * inner[3], i.rect[3] - i.rect[1]);
++            close(scale * inner[4], if i.flip_h { i.rect[2] } else { i.rect[0] });
++            close(scale * inner[5], i.rect[1]);
++        }
++    }
++}
++
++fn check_legacy_added_text_dimensions(unit: f64) {
++    let mut doc = legacy_added_dimension_fixture(unit);
++    let Content::Text(mut text) = list_added(&doc)[0].content.clone() else { panic!("text") };
++    let original = text.clone();
++    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
++    text.text = "sx".into(); // Same glyph advances: this edit preserves wrapping and height.
++    update_content(&mut doc, 2, 0, &Content::Text(text.clone())).unwrap();
++    doc = reopen(&doc);
++    let Content::Text(saved) = list_added(&doc)[0].content.clone() else { panic!("text") };
++    assert_eq!((saved.text.as_str(), saved.size), (text.text.as_str(), text.size));
++    for (actual, expected) in saved.rect.into_iter().zip(text.rect) {
++        assert!((actual - expected).abs() <= expected.abs() * 1e-12);
++    }
++    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
++    let obj = doc.get(list_added(&doc)[0].obj);
++    assert!(obj.as_dict().unwrap().get(b"PCAdded").unwrap().as_dict().unwrap().contains(b"UserUnit"));
++    let scale = pdfcraft_model::pages(&doc)[2].user_unit(&doc);
++    for (coordinate, delta) in text.rect.iter_mut().zip([7.3, 4.7, 7.3, 4.7]) {
++        *coordinate += delta * scale;
++    }
++    if unit == 0.01 {
++        assert_ne!(text.rect[2] - text.rect[0], original.rect[2] - original.rect[0], "ordinary translation changes subtraction rounding");
++    }
++    update_content(&mut doc, 2, 0, &Content::Text(text)).unwrap();
++    doc = reopen(&doc);
++    let Content::Text(mut text) = list_added(&doc)[0].content.clone() else { panic!("text") };
++    assert_eq!(text.size, original.size);
++    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
++    text.text = "xs".into();
++    update_content(&mut doc, 2, 0, &Content::Text(text.clone())).unwrap();
++    assert_added_dimension_paint(&reopen(&doc), 0, &Content::Text(text));
++}
++
++fn check_legacy_added_image_dimensions(unit: f64) {
++    let mut doc = legacy_added_dimension_fixture(unit);
++    let Content::Image(mut image) = list_added(&doc)[1].content.clone() else { panic!("image") };
++    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
++    image.flip_h = true;
++    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
++    doc = reopen(&doc);
++    assert_eq!(list_added(&doc)[1].content, Content::Image(image.clone()));
++    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
++    let scale = pdfcraft_model::pages(&doc)[2].user_unit(&doc);
++    for (coordinate, delta) in image.rect.iter_mut().zip([7.3, 4.7, 7.3, 4.7]) {
++        *coordinate += delta * scale;
++    }
++    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
++    doc = reopen(&doc);
++    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
++    image.flip_h = false;
++    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
++    assert_added_dimension_paint(&reopen(&doc), 1, &Content::Image(image));
++}
++
++#[test]
++fn legacy_added_dimension_updates_large_text() {
++    check_legacy_added_text_dimensions(100.0);
++}
++
++#[test]
++fn legacy_added_dimension_updates_small_text() {
++    check_legacy_added_text_dimensions(0.01);
++}
++
++#[test]
++fn legacy_added_dimension_updates_tiny_paint() {
++    check_legacy_added_text_dimensions(0.000001);
++    check_legacy_added_image_dimensions(0.000001);
++}
++
++#[test]
++fn legacy_added_dimension_updates_small_images() {
++    check_legacy_added_image_dimensions(0.01);
++}
++
++#[test]
++fn legacy_added_dimension_updates_reject_new_and_resized() {
++    for unit in [0.01, 100.0] {
++        let mut doc = legacy_added_dimension_fixture(unit);
++        let before = streams(&doc, 2);
++        let Content::Text(text) = list_added(&doc)[0].content.clone() else { panic!("text") };
++        assert!(add_content(&mut doc, 2, &Content::Text(text.clone())).is_err(), "new text keeps authoring size limits");
++        for size in [text.size * 2.0, 0.0, -1.0, f64::NAN, f64::INFINITY] {
++            assert!(update_content(&mut doc, 2, 0, &Content::Text(AddedText { size, ..text.clone() })).is_err());
++        }
++        if unit < 1.0 {
++            let Content::Image(image) = list_added(&doc)[1].content.clone() else { panic!("image") };
++            assert!(add_content(&mut doc, 2, &Content::Image(image.clone())).is_err(), "new image keeps authoring extent limits");
++            for width in [(text.rect[2] - text.rect[0]) / 2.0, 0.0, f64::NAN, f64::INFINITY] {
++                let mut resized = text.clone();
++                resized.rect[2] = resized.rect[0] + width;
++                assert!(update_content(&mut doc, 2, 0, &Content::Text(resized)).is_err(), "changed text width remains bounded");
++            }
++            for axis in [0, 1] {
++                for extent in [(image.rect[axis + 2] - image.rect[axis]) / 2.0, 0.0, f64::NAN, f64::INFINITY] {
++                    let mut resized = image.clone();
++                    resized.rect[axis + 2] = resized.rect[axis] + extent;
++                    assert!(update_content(&mut doc, 2, 1, &Content::Image(resized)).is_err(), "changed image extent remains bounded");
++                }
++            }
++        }
++        assert_eq!(streams(&doc, 2), before, "refused edits leave existing content intact");
++    }
++}
+diff --git a/crates/engine/src/signature_image.rs b/crates/engine/src/signature_image.rs
+index d1e3ad5..8035857 100644
+--- a/crates/engine/src/signature_image.rs
++++ b/crates/engine/src/signature_image.rs
+@@ -199,7 +199,7 @@ mod tests {
+     /// A 300 x 400 page shown turned `rotation` degrees clockwise.
+     fn page(rotation: u16) -> PageInfo {
+         let (width, height) = if rotation.is_multiple_of(180) { (300.0, 400.0) } else { (400.0, 300.0) };
+-        PageInfo { width, height, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation }
++        PageInfo { width, height, user_unit: 1.0, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation }
+     }
+ 
+     fn png(w: u32, h: u32) -> Vec<u8> {
+diff --git a/crates/measure/src/lib.rs b/crates/measure/src/lib.rs
+index fbd9684..3873fcd 100644
+--- a/crates/measure/src/lib.rs
++++ b/crates/measure/src/lib.rs
+@@ -470,8 +470,7 @@ pub fn scale_at(doc: &Document, page_index: usize, at: Point) -> Result<Scale> {
+             }
+         }
+     }
+-    let user_unit = p.dict.get(b"UserUnit").and_then(Object::as_f64).unwrap_or(1.0);
+-    Scale::new(user_unit / 72.0, "in", 2)
++    Scale::new(checked_page_user_unit(doc, &p)? / 72.0, "in", 2)
+ }
+ /// Add a named rectangular viewport. Existing viewports are preserved in drawing order.
+ pub fn set_scale(doc: &mut Document, page_index: usize, bbox: [f64; 4], name: &str, scale: &Scale) -> Result<()> {
+@@ -527,29 +526,33 @@ pub fn csv(measurements: &[Measurement]) -> String {
+ #[cfg(test)]
+ mod tests;
+ 
++// Coordinate APIs reject invalid numeric units rather than silently defaulting them.
++// Missing/non-numeric values retain the default; accepted values use model/renderer precision.
++fn checked_page_user_unit(doc: &Document, page: &pdfcraft_model::Page) -> Result<f64> {
++    let unit = page.dict.get(b"UserUnit").and_then(|value| doc.resolve(value).as_f64()).unwrap_or(1.0);
++    if !unit.is_finite() || unit <= 0.0 || unit > 75000.0 {
++        return Err(invalid("invalid page UserUnit"));
++    }
++    Ok(page.user_unit(doc))
++}
++
+ /// Display points (top-left, y down, after Rotate/UserUnit) to PDF user space.
+ pub fn view_to_user(doc: &Document, page_index: usize, at: Point) -> Result<Point> {
+     check_points(&[at])?;
+     let page = page(doc, page_index)?;
+-    let unit = page.dict.get(b"UserUnit").and_then(Object::as_f64).unwrap_or(1.0);
+-    if !unit.is_finite() || unit <= 0.0 || unit > 75000.0 {
+-        return Err(invalid("invalid page UserUnit"));
+-    }
++    checked_page_user_unit(doc, &page)?;
+     let (_, height) = page.display_size(doc);
+     let m = pdfcraft_content::Matrix(page.view_matrix(doc));
+-    let (x, y) = m.apply(at[0] / unit, height - at[1] / unit);
++    let (x, y) = m.apply(at[0], height - at[1]);
+     check_points(&[[x, y]])?;
+     Ok([x, y])
+ }
+ pub fn user_to_view(doc: &Document, page_index: usize, at: Point) -> Result<Point> {
+     check_points(&[at])?;
+     let page = page(doc, page_index)?;
+-    let unit = page.dict.get(b"UserUnit").and_then(Object::as_f64).unwrap_or(1.0);
+-    if !unit.is_finite() || unit <= 0.0 || unit > 75000.0 {
+-        return Err(invalid("invalid page UserUnit"));
+-    }
++    checked_page_user_unit(doc, &page)?;
+     let (_, height) = page.display_size(doc);
+     let m = pdfcraft_content::Matrix(page.view_matrix(doc)).invert().ok_or_else(|| invalid("invalid page transform"))?;
+     let (x, y) = m.apply(at[0], at[1]);
+-    Ok([x * unit, (height - y) * unit])
++    Ok([x, height - y])
+ }
+diff --git a/crates/measure/src/tests.rs b/crates/measure/src/tests.rs
+index 1a563dd..ebe435a 100644
+--- a/crates/measure/src/tests.rs
++++ b/crates/measure/src/tests.rs
+@@ -171,18 +171,81 @@ fn measurement_csv_quotes_newlines_and_blocks_formula_cells() {
+ 
+ #[test]
+ fn coordinates_roundtrip_for_crop_rotation_and_user_unit() {
+-    for rotation in [0, 90, 180, 270] {
+-        let d = fixture("", &format!("/UserUnit 2 /Rotate {rotation} /CropBox [10 20 210 320]"), &[]);
+-        for view in [[0.0, 0.0], [37.125, 81.375], [123.0, 175.0]] {
+-            let user = view_to_user(&d, 0, view).unwrap();
+-            let actual = user_to_view(&d, 0, user).unwrap();
+-            close(actual[0], view[0]);
+-            close(actual[1], view[1]);
++    for (unit, indirect) in [(0.5, false), (1.0, false), (2.0, false), (0.1, false), (2.0, true)] {
++        // The renderer/model deliberately normalize local units through f32.
++        let normalized = f64::from(unit as f32);
++        for rotation in [0, 90, 180, 270] {
++            let mut d = fixture("", &format!("/UserUnit {unit} /Rotate {rotation} /CropBox [10 20 210 320]"), &[]);
++            if indirect {
++                let reference = d.add(Object::Real(unit));
++                let p = crate::page(&d, 0).unwrap();
++                d.update_dict(p.obj, |page| page.set(b"UserUnit".to_vec(), Object::Ref(reference))).unwrap();
++            }
++            let top_left = match rotation {
++                90 => [10.0, 20.0],
++                180 => [210.0, 20.0],
++                270 => [210.0, 320.0],
++                _ => [10.0, 320.0],
++            };
++            let actual = view_to_user(&d, 0, [0.0, 0.0]).unwrap();
++            close(actual[0], top_left[0]);
++            close(actual[1], top_left[1]);
++            let expected = match rotation {
++                90 => [10.0 + 20.0 / normalized, 20.0 + 10.0 / normalized],
++                180 => [210.0 - 10.0 / normalized, 20.0 + 20.0 / normalized],
++                270 => [210.0 - 20.0 / normalized, 320.0 - 10.0 / normalized],
++                _ => [10.0 + 10.0 / normalized, 320.0 - 20.0 / normalized],
++            };
++            let actual = view_to_user(&d, 0, [10.0, 20.0]).unwrap();
++            close(actual[0], expected[0]);
++            close(actual[1], expected[1]);
++            let view = user_to_view(&d, 0, expected).unwrap();
++            close(view[0], 10.0);
++            close(view[1], 20.0);
++            for view in [[0.0, 0.0], [37.125, 81.375], [123.0, 175.0]] {
++                let user = view_to_user(&d, 0, view).unwrap();
++                let actual = user_to_view(&d, 0, user).unwrap();
++                close(actual[0], view[0]);
++                close(actual[1], view[1]);
++            }
++            let a = view_to_user(&d, 0, [10.0, 20.0]).unwrap();
++            let b = view_to_user(&d, 0, [70.0, 100.0]).unwrap();
++            let scale = scale_at(&d, 0, a).unwrap();
++            assert_eq!(scale.x, normalized / 72.0);
++            assert_eq!(scale.y, normalized / 72.0);
++            close(reading(Kind::Distance, &[a, b], &scale).unwrap().value, 100.0 / 72.0);
+         }
+-        let a = view_to_user(&d, 0, [10.0, 20.0]).unwrap();
+-        let b = view_to_user(&d, 0, [70.0, 100.0]).unwrap();
+-        let scale = scale_at(&d, 0, a).unwrap();
+-        close(reading(Kind::Distance, &[a, b], &scale).unwrap().value, 100.0 / 72.0);
++    }
++}
++
++#[test]
++fn measurement_units_validate_numeric_values_and_keep_defaults_and_viewport_precedence() {
++    for unit in [0.0, -1.0, f64::NAN, f64::INFINITY, 75000.1] {
++        for indirect in [false, true] {
++            let mut d = fixture("", "/CropBox [10 20 210 320]", &[]);
++            let value = if indirect { Object::Ref(d.add(Object::Real(unit))) } else { Object::Real(unit) };
++            let p = crate::page(&d, 0).unwrap();
++            d.update_dict(p.obj, |page| page.set(b"UserUnit".to_vec(), value)).unwrap();
++            assert!(view_to_user(&d, 0, [10.0, 20.0]).is_err(), "unit={unit}, indirect={indirect}");
++            assert!(user_to_view(&d, 0, [10.0, 20.0]).is_err(), "unit={unit}, indirect={indirect}");
++            assert!(scale_at(&d, 0, [25.0, 35.0]).is_err(), "unit={unit}, indirect={indirect}");
++            let calibrated = Scale::new(3.0, "m", 2).unwrap();
++            set_scale(&mut d, 0, [20.0, 30.0, 50.0, 60.0], "detail", &calibrated).unwrap();
++            assert_eq!(scale_at(&d, 0, [25.0, 35.0]).unwrap(), calibrated);
++        }
++    }
++    for value in [None, Some(Object::name("NotNumeric")), Some(Object::Real(1e-300))] {
++        let mut d = fixture("", "/CropBox [10 20 210 320]", &[]);
++        if let Some(value) = value {
++            let p = crate::page(&d, 0).unwrap();
++            d.update_dict(p.obj, |page| page.set(b"UserUnit".to_vec(), value)).unwrap();
++        }
++        // Missing/non-numeric defaults and accepted f32 underflow agree with the model.
++        assert_eq!(crate::page(&d, 0).unwrap().user_unit(&d), 1.0);
++        assert_eq!(view_to_user(&d, 0, [10.0, 20.0]).unwrap(), [20.0, 300.0]);
++        assert_eq!(user_to_view(&d, 0, [20.0, 300.0]).unwrap(), [10.0, 20.0]);
++        assert_eq!(scale_at(&d, 0, [20.0, 300.0]).unwrap().x, 1.0 / 72.0);
++        assert_eq!(scale_at(&d, 0, [20.0, 300.0]).unwrap().y, 1.0 / 72.0);
+     }
+ }
+ 
+diff --git a/crates/model/src/lib.rs b/crates/model/src/lib.rs
+index ff9e70c..13eb179 100644
+--- a/crates/model/src/lib.rs
++++ b/crates/model/src/lib.rs
+@@ -39,17 +39,27 @@ impl Page {
+         self.dict.get(b"Rotate").and_then(|o| doc.resolve(o).as_int()).unwrap_or(0).rem_euclid(360) / 90 * 90
+     }
+ 
++    /// The local user-space unit in multiples of 1/72 inch (not inherited).
++    pub fn user_unit(&self, doc: &Document) -> f64 {
++        // Match the bootstrap renderer's f32 unit, including underflow/default handling.
++        let unit = self.dict.get(b"UserUnit").and_then(|o| doc.resolve(o).as_f64()).unwrap_or(1.0) as f32;
++        if unit.is_finite() && unit > 0.0 && unit <= 75_000.0 { unit as f64 } else { 1.0 }
++    }
++
+     /// The displayed size (width, height) in points.
+     pub fn display_size(&self, doc: &Document) -> (f64, f64) {
+         let c = self.crop(doc);
+-        let (w, h) = (c[2] - c[0], c[3] - c[1]);
++        let unit = self.user_unit(doc);
++        let (w, h) = ((c[2] - c[0]) * unit, (c[3] - c[1]) * unit);
+         if self.rotation(doc) % 180 == 0 { (w, h) } else { (h, w) }
+     }
+ 
+     /// The matrix `[a b c d e f]` from display space (origin at the bottom-left of the page as
+-    /// shown, y up, after `/Rotate`) to user space.
++    /// shown, y up, after `/Rotate` and `/UserUnit`) to raw user space.
+     pub fn view_matrix(&self, doc: &Document) -> [f64; 6] {
+-        view_matrix_for(self.rotation(doc), self.crop(doc))
++        let [a, b, c, d, e, f] = view_matrix_for(self.rotation(doc), self.crop(doc));
++        let scale = 1.0 / self.user_unit(doc);
++        [a * scale, b * scale, c * scale, d * scale, e, f]
+     }
+ }
+ 
+@@ -166,4 +176,36 @@ mod tests {
+             assert_eq!(tl, expect, "rotation {rotate}");
+         }
+     }
++    #[test]
++    fn user_unit_scales_display_size_and_inverse_mapping_without_changing_raw_crop() {
++        for rotation in [0, 90, 180, 270] {
++            let d = doc(rotation);
++            let base = pages(&d).remove(0);
++            for unit in [0.5, 1.0, 2.0] {
++                let mut p = base.clone();
++                p.dict.set(b"UserUnit".to_vec(), Object::Real(unit));
++                assert_eq!(p.crop(&d), [10.0, 20.0, 210.0, 320.0]);
++                let expected = if rotation % 180 == 0 { (200.0 * unit, 300.0 * unit) } else { (300.0 * unit, 200.0 * unit) };
++                assert_eq!(p.display_size(&d), expected);
++                let (w, h) = expected;
++                for (x, y) in [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)] {
++                    let raw = apply(p.view_matrix(&d), x, y);
++                    assert!([10.0, 210.0].contains(&raw[0]) && [20.0, 320.0].contains(&raw[1]));
++                }
++                let expected_top_left = match rotation {
++                    0 => [10.0, 320.0],
++                    90 => [10.0, 20.0],
++                    180 => [210.0, 20.0],
++                    _ => [210.0, 320.0],
++                };
++                assert_eq!(apply(p.view_matrix(&d), 0.0, h), expected_top_left);
++            }
++            for invalid in [0.0, -1.0, 75_001.0] {
++                let mut p = base.clone();
++                p.dict.set(b"UserUnit".to_vec(), Object::Real(invalid));
++                assert_eq!(p.user_unit(&d), 1.0);
++                assert_eq!(p.display_size(&d), base.display_size(&d));
++            }
++        }
++    }
+ }
+diff --git a/crates/print/src/lib.rs b/crates/print/src/lib.rs
+index 35e4661..f39683f 100644
+--- a/crates/print/src/lib.rs
++++ b/crates/print/src/lib.rs
+@@ -402,6 +402,13 @@ pub fn layout(sizes: &[(f64, f64)], settings: &Settings) -> Result<Vec<Sheet>, P
+     Ok(sheets)
+ }
+ 
++// Model-derived transforms and clipping bounds need their full PDF decimal precision.
++fn geometry_number(value: f64) -> String {
++    let mut bytes = Vec::new();
++    pdfcraft_cos::serialize(&Object::Real(value), &mut bytes);
++    String::from_utf8_lossy(&bytes).into_owned()
++}
++
+ fn n(v: f64) -> String {
+     let s = format!("{v:.4}");
+     let s = s.trim_end_matches('0').trim_end_matches('.');
+@@ -564,22 +571,22 @@ pub fn impose(src: &Document, settings: &Settings) -> Result<Vec<u8>, PrintError
+             let [x0, y0, x1, y1] = pl.clip;
+             c.push_str(&format!(
+                 "q {} {} {} {} {} {} cm {} {} {} {} re W n {} {} {} {} {} {} cm /{name} Do Q\n",
+-                n(a),
+-                n(b),
+-                n(cc),
+-                n(d),
+-                n(e),
+-                n(f),
+-                n(x0),
+-                n(y0),
+-                n(x1 - x0),
+-                n(y1 - y0),
+-                n(ua),
+-                n(ub),
+-                n(uc),
+-                n(ud),
+-                n(ue),
+-                n(uf)
++                geometry_number(a),
++                geometry_number(b),
++                geometry_number(cc),
++                geometry_number(d),
++                geometry_number(e),
++                geometry_number(f),
++                geometry_number(x0),
++                geometry_number(y0),
++                geometry_number(x1 - x0),
++                geometry_number(y1 - y0),
++                geometry_number(ua),
++                geometry_number(ub),
++                geometry_number(uc),
++                geometry_number(ud),
++                geometry_number(ue),
++                geometry_number(uf)
+             ));
+         }
+         if !sheet.borders.is_empty() || !sheet.lines.is_empty() {
+diff --git a/crates/print/src/tests.rs b/crates/print/src/tests.rs
+index 101e3d4..39fcc1b 100644
+--- a/crates/print/src/tests.rs
++++ b/crates/print/src/tests.rs
+@@ -359,3 +359,53 @@ fn the_spoolers_reply_drops_the_file_count_of_a_job_sent_on_stdin() {
+     );
+     assert_eq!(spool::job_message(b""), "");
+ }
++
++#[test]
++fn imposed_pages_preserve_small_and_large_user_unit_matrices() {
++    for (unit, mode) in [(1e-5, SizeMode::Actual), (75000.0, SizeMode::Fit), (1e-8, SizeMode::Fit)] {
++        let mut doc = fixture(1);
++        let page = pdfcraft_model::pages(&doc)[0].obj;
++        doc.update_dict(page, |d| d.set(b"UserUnit".to_vec(), Object::Real(unit))).unwrap();
++        let out = impose(&doc, &Settings { content: Content::Document, ..settings(vec![0], Layout::Size(mode)) }).unwrap();
++        let printed = Document::open(Arc::new(out)).unwrap();
++        let page = &pdfcraft_model::pages(&printed)[0];
++        let contents = printed.resolve(page.dict.get(b"Contents").unwrap());
++        let Object::Stream(stream) = &*contents else { panic!("sheet content") };
++        let bytes = stream.decoded().unwrap();
++        let parsed = pdfcraft_content::parse(&bytes);
++        assert_eq!(parsed.skipped, 0);
++        let cms: Vec<_> = parsed.ops.iter().filter(|op| op.is("cm")).collect();
++        assert_eq!(cms.len(), 2, "placement and source-to-display matrices");
++        let normalized = f64::from(unit as f32);
++        let scale = if mode == SizeMode::Actual { 1.0 } else { 756.0 / (300.0 * normalized) };
++        let expected = [
++            [scale, 0.0, 0.0, scale, 306.0 - 100.0 * normalized * scale, 396.0 - 150.0 * normalized * scale],
++            [normalized, 0.0, 0.0, normalized, 0.0, 0.0],
++        ];
++        for (cm, expected) in cms.iter().zip(expected) {
++            assert_eq!(cm.operands.len(), 6);
++            assert!(!bytes[cm.span.clone()].contains(&b'e') && !bytes[cm.span.clone()].contains(&b'E'));
++            for (actual, expected) in cm.nums::<6>().unwrap().into_iter().zip(expected) {
++                assert!((actual - expected).abs() <= 1e-12 * expected.abs(), "unit={unit}: {actual} != {expected}");
++            }
++        }
++        let clip = parsed.ops.iter().find(|op| op.is("re")).unwrap();
++        assert_eq!(clip.operands.len(), 4);
++        let rect = clip.nums::<4>().unwrap();
++        assert_eq!(rect, [0.0, 0.0, 200.0 * normalized, 300.0 * normalized]);
++        assert!(rect[2] > 0.0 && rect[3] > 0.0, "the clip must retain the visible page");
++        let clip_tokens = std::str::from_utf8(&bytes[clip.span.clone()]).unwrap();
++        assert!(clip_tokens.split_whitespace().take(4).all(|token| !token.contains('e') && !token.contains('E')));
++        let apply = |m: [f64; 6], p: [f64; 2]| [m[0] * p[0] + m[2] * p[1] + m[4], m[1] * p[0] + m[3] * p[1] + m[5]];
++        let to_sheet = |p| apply(cms[0].nums::<6>().unwrap(), apply(cms[1].nums::<6>().unwrap(), p));
++        let mut anchors = vec![([100.0, 150.0], [306.0, 396.0])];
++        if mode == SizeMode::Fit {
++            anchors.extend([([0.0, 0.0], [54.0, 18.0]), ([200.0, 300.0], [558.0, 774.0])]);
++        }
++        for (raw, expected) in anchors {
++            for (actual, expected) in to_sheet(raw).into_iter().zip(expected) {
++                assert!((actual - expected).abs() < 1e-9, "unit={unit}: {actual} != {expected}");
++            }
++        }
++    }
++}
+diff --git a/crates/render/src/inspect.rs b/crates/render/src/inspect.rs
+index 2ce2d98..31ce768 100644
+--- a/crates/render/src/inspect.rs
++++ b/crates/render/src/inspect.rs
+@@ -76,6 +76,9 @@ pub struct PageInfo {
+     /// Displayed size in points, after `/Rotate` and `/UserUnit`.
+     pub width: f32,
+     pub height: f32,
++    /// Validated page-local raw-to-physical scale, independent of placeholder dimensions.
++    /// Missing or malformed `/UserUnit` uses 1.
++    pub user_unit: f32,
+     /// Page label (`/PageLabels`), falling back to the 1-based page number.
+     pub label: String,
+     /// Effective crop box in user space [x0, y0, x1, y1] (the visible region).
+@@ -362,7 +365,7 @@ pub fn inspect(bytes: Arc<Vec<u8>>, password: Option<&str>) -> Result<DocInfo, O
+             let crop = [c.x0 as f32, c.y0 as f32, c.x1 as f32, c.y1 as f32];
+             // Degenerate boxes still get a usable placeholder size so layout never divides by zero.
+             let (w, h) = if w.is_finite() && h.is_finite() && w >= 1.0 && h >= 1.0 { (w, h) } else { (612.0, 792.0) };
+-            out.push(PageInfo { width: w, height: h, label: (i + 1).to_string(), crop, rotation });
++            out.push(PageInfo { width: w, height: h, user_unit: page.user_unit(), label: (i + 1).to_string(), crop, rotation });
+         }
+         out
+     }));
+@@ -1155,7 +1158,7 @@ mod tests {
+     fn view_and_user_space_round_trip_for_every_rotation() {
+         for rotation in [0u16, 90, 180, 270] {
+             let (w, h) = if rotation % 180 == 0 { (200.0, 300.0) } else { (300.0, 200.0) };
+-            let p = super::PageInfo { width: w, height: h, label: String::new(), crop: [10.0, 20.0, 210.0, 320.0], rotation };
++            let p = super::PageInfo { width: w, height: h, user_unit: 1.0, label: String::new(), crop: [10.0, 20.0, 210.0, 320.0], rotation };
+             for (x, y) in [(0.0, 0.0), (15.0, 40.0), (w, h)] {
+                 let [ux, uy] = p.view_to_user(x, y);
+                 let [vx, vy] = p.user_to_view(ux, uy);
+@@ -1163,7 +1166,7 @@ mod tests {
+             }
+         }
+         // Unrotated: the view's top-left is the crop box's top-left.
+-        let p = super::PageInfo { width: 200.0, height: 300.0, label: String::new(), crop: [10.0, 20.0, 210.0, 320.0], rotation: 0 };
++        let p = super::PageInfo { width: 200.0, height: 300.0, user_unit: 1.0, label: String::new(), crop: [10.0, 20.0, 210.0, 320.0], rotation: 0 };
+         assert_eq!(p.view_to_user(0.0, 0.0), [10.0, 320.0]);
+         assert_eq!(p.view_rect_to_quad([0.0, 0.0, 10.0, 5.0]), [10.0, 320.0, 20.0, 320.0, 10.0, 315.0, 20.0, 315.0]);
+     }
+@@ -1341,7 +1344,7 @@ trailer << /Root 1 0 R >>
+     #[test]
+     fn destination_points_map_to_the_displayed_page() {
+         // A crop box away from the origin: x 100..400, y 50..450.
+-        let mut p = PageInfo { width: 300.0, height: 400.0, label: "1".into(), crop: [100.0, 50.0, 400.0, 450.0], rotation: 0 };
++        let mut p = PageInfo { width: 300.0, height: 400.0, user_unit: 1.0, label: "1".into(), crop: [100.0, 50.0, 400.0, 450.0], rotation: 0 };
+         assert_eq!(p.dest_fraction(Some(100.0), Some(450.0), 0), [Some(0.0), Some(0.0)]);
+         assert_eq!(p.dest_fraction(Some(250.0), Some(350.0), 0), [Some(0.5), Some(0.25)]);
+         // Unspecified stays unspecified; off-page and huge values are clamped to the page.
+@@ -1370,7 +1373,14 @@ trailer << /Root 1 0 R >>
+             let mut info = DocInfo {
+                 file_size: 321,
+                 pdf_version: "1.7".into(),
+-                pages: vec![PageInfo { width: 300.0, height: 200.0, label: "1".into(), crop: [10.0, 20.0, 210.0, 320.0], rotation: 90 }],
++                pages: vec![PageInfo {
++                    width: 300.0,
++                    height: 200.0,
++                    user_unit: 1.0,
++                    label: "1".into(),
++                    crop: [10.0, 20.0, 210.0, 320.0],
++                    rotation: 90,
++                }],
+                 ..Default::default()
+             };
+             inspect_structure(&mut info, |tmp| {
+diff --git a/crates/render/src/lib.rs b/crates/render/src/lib.rs
+index 12e3a6d..8318fdc 100644
+--- a/crates/render/src/lib.rs
++++ b/crates/render/src/lib.rs
+@@ -35,3 +35,6 @@ pub enum OpenError {
+     #[error("{0}")]
+     Unsupported(String),
+ }
++
++#[cfg(test)]
++mod user_unit_tests;
+diff --git a/crates/render/src/user_unit_tests.rs b/crates/render/src/user_unit_tests.rs
+new file mode 100644
+index 0000000..cacf6ad
+--- /dev/null
++++ b/crates/render/src/user_unit_tests.rs
+@@ -0,0 +1,116 @@
++//! Contributor-original finite page geometry and physical UserUnit controls.
++
++use std::sync::Arc;
++
++use hayro::hayro_interpret::{InterpreterSettings, TransformExt};
++use hayro::hayro_syntax::Pdf;
++
++use crate::{PageRenderer, RenderConfig, RenderRequest, RequestKind, inspect};
++
++fn fixture(rotation: i32, local_unit: Option<&str>) -> Arc<Vec<u8>> {
++    let content = "0 0 1 rg 20 30 10 10 re f 0 0 0 rg BT /F 6 Tf 1 0 0 1 14 66 Tm (Unit) Tj ET";
++    let unit = local_unit.map(|value| format!("/UserUnit {value}")).unwrap_or_default();
++    let objects = [
++        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
++        // UserUnit is not inheritable: this parent value must never affect a leaf.
++        "<< /Type /Pages /Kids [3 0 R] /Count 1 /UserUnit 9 >>".to_owned(),
++        format!(
++            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 100] /CropBox [10 20 50 80] /Rotate {rotation} {unit} /Resources << /Font << /F 5 0 R >> >> /Contents 4 0 R >>"
++        ),
++        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
++        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
++    ];
++    let mut bytes = b"%PDF-1.7\n".to_vec();
++    let mut offsets = Vec::new();
++    for (i, object) in objects.iter().enumerate() {
++        offsets.push(bytes.len());
++        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
++    }
++    let xref = bytes.len();
++    bytes.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
++    for offset in offsets {
++        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
++    }
++    bytes.extend_from_slice(format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
++    Arc::new(bytes)
++}
++
++// Independent clockwise rotation of a raw crop-relative point, then y-down display.
++fn expected_view(rotation: i32, unit: f32, x: f32, y: f32) -> [f32; 2] {
++    let (x, y) = (x - 10.0, y - 20.0);
++    let (x, y) = match rotation {
++        90 => (y, x),
++        180 => (40.0 - x, y),
++        270 => (60.0 - y, 40.0 - x),
++        _ => (x, 60.0 - y),
++    };
++    [x * unit, y * unit]
++}
++
++fn close(a: f32, b: f32) {
++    assert!((a - b).abs() < 0.002, "{a} != {b}");
++}
++
++#[test]
++fn physical_geometry_raster_and_text_scale_once_with_local_user_units() {
++    for rotation in [0, 90, 180, 270] {
++        let default_pdf = Pdf::new(fixture(rotation, None)).unwrap();
++        let default_text = crate::text::extract_page(&default_pdf, 0, &InterpreterSettings::default()).unwrap();
++        assert_eq!(default_text.plain_text(), "Unit");
++        for (entry, unit) in [(None, 1.0), (Some("1"), 1.0), (Some("2"), 2.0), (Some("0.5"), 0.5)] {
++            let bytes = fixture(rotation, entry);
++            let info = inspect(bytes.clone(), None).unwrap();
++            let page_info = &info.pages[0];
++            let expected_size = if rotation % 180 == 0 { (40.0 * unit, 60.0 * unit) } else { (60.0 * unit, 40.0 * unit) };
++            assert_eq!((page_info.width, page_info.height), expected_size);
++            assert_eq!(page_info.crop, [10.0, 20.0, 50.0, 80.0]);
++            assert_eq!(page_info.user_unit, unit);
++            let pdf = Pdf::new(bytes.clone()).unwrap();
++            let pages = pdf.pages();
++            let page = &pages[0];
++            assert_eq!(page.user_unit(), unit);
++            assert_eq!(page.render_dimensions(), expected_size);
++            for [x, y] in [[10.0, 20.0], [50.0, 20.0], [10.0, 80.0], [50.0, 80.0], [25.0, 35.0]] {
++                let expected = expected_view(rotation, unit, x, y);
++                let transformed = page.initial_transform(true).to_kurbo() * kurbo::Point::new(x as f64, y as f64);
++                close(transformed.x as f32, expected[0]);
++                close(transformed.y as f32, expected[1]);
++                let view = page_info.user_to_view(x, y);
++                close(view[0], expected[0]);
++                close(view[1], expected[1]);
++                let raw = page_info.view_to_user(view[0], view[1]);
++                close(raw[0], x);
++                close(raw[1], y);
++            }
++            let mut renderer = PageRenderer::new(bytes, RenderConfig::default());
++            let raster = renderer.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0 });
++            assert!(raster.error.is_none(), "{:?}", raster.error);
++            assert_eq!((raster.width, raster.height), (expected_size.0 as u32, expected_size.1 as u32));
++            let center = expected_view(rotation, unit, 25.0, 35.0);
++            let offset = ((center[1] as u32 * raster.width + center[0] as u32) * 4) as usize;
++            assert_eq!(&raster.rgba[offset..offset + 4], &[0, 0, 255, 255]);
++            let text = crate::text::extract_page(&pdf, 0, &InterpreterSettings::default()).unwrap();
++            assert_eq!(text.plain_text(), "Unit");
++            assert_eq!(text.find("Unit"), vec![0..text.glyphs.len()]);
++            assert_eq!(text.glyphs.len(), default_text.glyphs.len());
++            for (glyph, original) in text.glyphs.iter().zip(&default_text.glyphs) {
++                assert_eq!(glyph.text, original.text);
++                for (actual, original) in glyph.rect.into_iter().zip(original.rect) {
++                    close(actual, original * unit);
++                }
++            }
++        }
++    }
++}
++
++#[test]
++fn malformed_local_user_units_keep_the_default_physical_size() {
++    for entry in ["0", "-1", "75001", "/WrongType", "null"] {
++        let bytes = fixture(0, Some(entry));
++        let info = inspect(bytes.clone(), None).unwrap();
++        assert_eq!((info.pages[0].width, info.pages[0].height), (40.0, 60.0));
++        assert_eq!(info.pages[0].user_unit, 1.0);
++        let pdf = Pdf::new(bytes).unwrap();
++        assert_eq!(pdf.pages()[0].user_unit(), 1.0);
++    }
++}
+diff --git a/crates/ui-egui/src/canvas.rs b/crates/ui-egui/src/canvas.rs
+index a349c84..73862f3 100644
+--- a/crates/ui-egui/src/canvas.rs
++++ b/crates/ui-egui/src/canvas.rs
+@@ -3070,7 +3070,14 @@ trailer << /Root 1 0 R >>
+     fn view(pages: usize, layout: PageLayout) -> DocView {
+         let info = pdfcraft_render::DocInfo {
+             pages: (0..pages)
+-                .map(|_| pdfcraft_render::PageInfo { width: 300.0, height: 400.0, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation: 0 })
++                .map(|_| pdfcraft_render::PageInfo {
++                    width: 300.0,
++                    height: 400.0,
++                    user_unit: 1.0,
++                    label: String::new(),
++                    crop: [0.0, 0.0, 300.0, 400.0],
++                    rotation: 0,
++                })
+                 .collect(),
+             ..Default::default()
+         };
+@@ -3126,8 +3133,14 @@ trailer << /Root 1 0 R >>
+ 
+     #[test]
+     fn fit_page_and_height_hold_still_while_mixed_page_sizes_scroll_past() {
+-        let page =
+-            |width: f32, height: f32| pdfcraft_render::PageInfo { width, height, label: String::new(), crop: [0.0, 0.0, width, height], rotation: 0 };
++        let page = |width: f32, height: f32| pdfcraft_render::PageInfo {
++            width,
++            height,
++            user_unit: 1.0,
++            label: String::new(),
++            crop: [0.0, 0.0, width, height],
++            rotation: 0,
++        };
+         let info = DocInfo { pages: vec![page(300.0, 400.0), page(600.0, 800.0)], ..Default::default() };
+         for fit in [Fit::Page, Fit::Height] {
+             let mut v = DocView::new(DocId(1), &info, ViewDefaults::default());
+@@ -3163,7 +3176,14 @@ trailer << /Root 1 0 R >>
+     fn destinations_set_the_zoom_mode_and_the_point_to_show() {
+         let info = pdfcraft_render::DocInfo {
+             pages: (0..3)
+-                .map(|_| pdfcraft_render::PageInfo { width: 300.0, height: 400.0, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation: 0 })
++                .map(|_| pdfcraft_render::PageInfo {
++                    width: 300.0,
++                    height: 400.0,
++                    user_unit: 1.0,
++                    label: String::new(),
++                    crop: [0.0, 0.0, 300.0, 400.0],
++                    rotation: 0,
++                })
+                 .collect(),
+             ..Default::default()
+         };
+diff --git a/crates/ui-egui/src/forms_ui.rs b/crates/ui-egui/src/forms_ui.rs
+index 3f07f9b..ee5aad3 100644
+--- a/crates/ui-egui/src/forms_ui.rs
++++ b/crates/ui-egui/src/forms_ui.rs
+@@ -59,6 +59,20 @@ fn widget_rect(xf: &PageXform, info: &DocInfo, page: usize, r: [f64; 4]) -> Rect
+     xf.user_rect(info, page, [r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32])
+ }
+ 
++// Layout may substitute placeholder dimensions; the raw-to-physical unit stays explicit.
++pub(crate) fn page_user_unit(page: &pdfcraft_render::PageInfo) -> f32 {
++    let unit = page.user_unit;
++    if unit.is_finite() && unit > 0.0 && unit <= 75_000.0 { unit } else { 1.0 }
++}
++
++// DA font sizes and widget heights are raw PDF units; the canvas zoom is per physical point.
++fn editor_font_size(da: &str, rect: [f64; 4], zoom: f32, page: &pdfcraft_render::PageInfo) -> f32 {
++    let unit = page_user_unit(page);
++    let da = da.split_whitespace().collect::<Vec<_>>();
++    let size = da.iter().position(|x| *x == "Tf").and_then(|i| da.get(i.wrapping_sub(1))).and_then(|s| s.parse::<f32>().ok()).filter(|s| *s > 0.0);
++    (size.unwrap_or(((rect[3] - rect[1]) as f32 * 0.6).clamp(6.0, 12.0)) * unit * zoom).clamp(6.0, 64.0)
++}
++
+ fn fillable(f: &FormField) -> bool {
+     !f.read_only() && !matches!(f.kind, FormFieldKind::PushButton | FormFieldKind::Signature)
+ }
+@@ -287,11 +301,8 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, f
+     let mut next: Option<bool> = None; // Tab / Shift+Tab
+     match f.kind {
+         FormFieldKind::Text => {
+-            let da = f.da.split_whitespace().collect::<Vec<_>>();
+-            let size =
+-                da.iter().position(|x| *x == "Tf").and_then(|i| da.get(i.wrapping_sub(1))).and_then(|s| s.parse::<f32>().ok()).filter(|s| *s > 0.0);
+             let multiline = f.has(field_flags::MULTILINE);
+-            let font = (size.unwrap_or(((w.rect[3] - w.rect[1]) as f32 * 0.6).clamp(6.0, 12.0)) * zoom).clamp(6.0, 64.0);
++            let font = editor_font_size(&f.da, w.rect, zoom, info.pages.get(page)?);
+             egui::Area::new(egui::Id::new(("form-editor", view.id.0))).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
+                 ui.set_min_size(rect.size());
+                 let Some(fx) = view.forms.focus.as_mut() else { return };
+@@ -434,3 +445,37 @@ pub fn field_screen_rect(view: &DocView, info: &DocInfo, f: &FormField, widget:
+     let xf = view.page_xform(page)?;
+     Some(widget_rect(&xf, info, page, w.rect))
+ }
++
++#[cfg(test)]
++mod user_unit_tests {
++    use super::editor_font_size;
++    use pdfcraft_render::PageInfo;
++
++    #[test]
++    fn focused_form_fonts_convert_raw_sizes_to_physical_points_once() {
++        let widget = [20.0, 30.0, 80.0, 50.0];
++        for rotation in [0, 90, 180, 270] {
++            for unit in [0.5, 1.0, 2.0] {
++                let (width, height) = if rotation % 180 == 0 { (100.0, 200.0) } else { (200.0, 100.0) };
++                let page = PageInfo {
++                    width: width * unit,
++                    height: height * unit,
++                    user_unit: unit,
++                    label: "1".into(),
++                    crop: [10.0, 20.0, 110.0, 220.0],
++                    rotation,
++                };
++                // At 125% zoom an 18-unit explicit font and a 12-unit height-based fallback
++                // must use the same physical conversion as their saved appearance.
++                for (da, raw_size) in [("/Helv 18 Tf 0 g", 18.0), ("/Helv 0 Tf 0 g", 12.0), ("", 12.0)] {
++                    let expected = raw_size * unit * 1.25;
++                    let actual = editor_font_size(da, widget, 1.25, &page);
++                    assert!((actual - expected).abs() < 0.001, "rotation={rotation}, unit={unit}, DA={da}: {actual} != {expected}");
++                }
++                // Keep the existing screen-size limits for tiny and large text.
++                assert_eq!(editor_font_size("/Helv 1 Tf", widget, 1.0, &page), 6.0);
++                assert_eq!(editor_font_size("/Helv 200 Tf", widget, 1.0, &page), 64.0);
++            }
++        }
++    }
++}
+diff --git a/crates/ui-egui/src/prepare.rs b/crates/ui-egui/src/prepare.rs
+index 9b79acc..5ec31d7 100644
+--- a/crates/ui-egui/src/prepare.rs
++++ b/crates/ui-egui/src/prepare.rs
+@@ -557,7 +557,11 @@ impl crate::PdfCraftApp {
+     pub fn open_field_props(&mut self, name: &str, widget: usize) {
+         let Some((_, id)) = self.active_ids() else { return };
+         let Some(f) = self.session.get(id).and_then(|d| d.form.iter().find(|f| f.name == name).cloned()) else { return };
+-        let mut d = FieldDraft::new(&f, widget);
++        let page = f.widgets.get(widget).and_then(|w| w.page);
++        let unit = page
++            .and_then(|page| self.session.get(id).and_then(|doc| doc.info.pages.get(page)))
++            .map_or(1.0, |page| crate::forms_ui::page_user_unit(page) as f64);
++        let mut d = FieldDraft::new(&f, widget).with_font_unit(unit);
+         d.look = self.session.get(id).and_then(|doc| doc.field_look(name));
+         d.check_style = self.session.get(id).and_then(|doc| doc.field_check_style(name));
+         if let Some(o) = d.original.as_mut() {
+@@ -662,8 +666,10 @@ pub struct FieldDraft {
+     pub default: String,
+     /// Check boxes and radio buttons: this widget's "on" state (export value).
+     pub on_state: String,
+-    /// 0 = auto.
++    /// Physical points on the selected widget's page; 0 = auto.
+     pub font_size: f64,
++    // A shared field still has one raw DA size; other pages may display it at another scale.
++    font_unit: f64,
+     /// Left, bottom, width, height in points.
+     pub position: [f64; 4],
+     /// `/MK /R`: 0, 90, 180 or 270 degrees counterclockwise.
+@@ -710,6 +716,7 @@ impl FieldDraft {
+             default: f.default.first().cloned().unwrap_or_default(),
+             on_state: f.widgets.get(widget).and_then(|w| w.on_state.clone()).unwrap_or_default(),
+             font_size: da_size(&f.da),
++            font_unit: 1.0,
+             position: [r[0], r[1], r[2] - r[0], r[3] - r[1]],
+             rotation: f.widgets.get(widget).map(|w| w.rotation).unwrap_or(0),
+             look: None,
+@@ -726,6 +733,17 @@ impl FieldDraft {
+         d
+     }
+ 
++    // Convert the UI working copy only. FieldProps and saved DA sizes stay in raw units.
++    fn with_font_unit(mut self, unit: f64) -> Self {
++        self.font_unit = unit;
++        self.font_size *= unit;
++        if let Some(original) = self.original.as_mut() {
++            original.font_unit = unit;
++            original.font_size = self.font_size;
++        }
++        self
++    }
++
+     pub fn title(&self) -> &'static str {
+         match self.kind {
+             FormFieldKind::Text => "Text Field Properties",
+@@ -762,7 +780,8 @@ impl FieldDraft {
+             multiline: ch(self.multiline, o.multiline),
+             max_len: ((self.limit, self.max_len) != (o.limit, o.max_len)).then_some((self.limit && self.max_len > 0).then_some(self.max_len)),
+             options: (self.options != o.options).then(|| self.options.clone()),
+-            font_size: ((self.font_size - o.font_size).abs() > 1e-6).then_some(self.font_size),
++            // Preserve the existing raw-unit change tolerance at every physical page scale.
++            font_size: ((self.font_size / self.font_unit - o.font_size / o.font_unit).abs() > 1e-6).then_some(self.font_size / self.font_unit),
+             rect: (self.position != o.position).then(|| {
+                 let [x, y, w, h] = self.position;
+                 (self.widget, [x, y, x + w.max(4.0), y + h.max(4.0)])
+@@ -859,9 +878,29 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
+                     let mut auto = d.font_size == 0.0;
+                     ui.horizontal(|ui| {
+                         if ui.checkbox(&mut auto, tl!("Auto")).changed() {
+-                            d.font_size = if auto { 0.0 } else { 12.0 };
++                            d.font_size = if auto { 0.0 } else { 12.0_f64.clamp(2.0 * d.font_unit, 100.0 * d.font_unit) };
++                        }
++                        // Keep the existing raw-size bounds while displaying physical points.
++                        let range = 2.0 * d.font_unit..=100.0 * d.font_unit;
++                        let formatter = ui.style().number_formatter.clone();
++                        let response = ui.add_enabled(
++                            !auto,
++                            egui::DragValue::new(&mut d.font_size)
++                                .range(range)
++                                .clamp_existing_to_range(false)
++                                .speed(0.25)
++                                .custom_formatter(move |value, decimals| {
++                                    let text = formatter.format(value, decimals);
++                                    // Focus/blur must not turn display rounding into a font edit.
++                                    if text.parse::<f64>().ok() == Some(value) { text } else { value.to_string() }
++                                })
++                                .suffix(" pt"),
++                        );
++                        // Keep loaded values and Auto untouched; bound every intentional edit,
++                        // including keyboard/accessibility increments that egui does not clamp.
++                        if !auto && response.changed() {
++                            d.font_size = d.font_size.clamp(2.0 * d.font_unit, 100.0 * d.font_unit);
+                         }
+-                        ui.add_enabled(!auto, egui::DragValue::new(&mut d.font_size).range(2.0..=100.0).speed(0.25).suffix(" pt"));
+                     });
+                     ui.end_row();
+                     if let Some(l) = d.look.as_mut() {
+diff --git a/crates/ui-egui/tests/fill_sign.rs b/crates/ui-egui/tests/fill_sign.rs
+index 9ba0cc5..db71fc8 100644
+--- a/crates/ui-egui/tests/fill_sign.rs
++++ b/crates/ui-egui/tests/fill_sign.rs
+@@ -322,7 +322,8 @@ fn saved_signature_cards_remove_and_add_without_changing_the_document() {
+ fn long_typed_names_fit_the_placed_signature_and_keep_every_outline() {
+     let text = "Alexandria Catherine Elizabeth Montgomery-Wellington";
+     let sig = SavedSig::Typed(text.into());
+-    let page = pdfcraft_render::PageInfo { width: 300.0, height: 400.0, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation: 0 };
++    let page =
++        pdfcraft_render::PageInfo { width: 300.0, height: 400.0, user_unit: 1.0, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation: 0 };
+     let pdfcraft_engine::Edit::AddAnnotation(a) = pdfcraft_ui_egui::fill_sign::place(0, &page, [40.0, 200.0], &sig, false, "").unwrap() else {
+         panic!("expected annotation");
+     };
+diff --git a/crates/ui-egui/tests/prepare.rs b/crates/ui-egui/tests/prepare.rs
+index cd6e013..a5d2ba6 100644
+--- a/crates/ui-egui/tests/prepare.rs
++++ b/crates/ui-egui/tests/prepare.rs
+@@ -475,3 +475,285 @@ fn actions_tab_adds_and_removes_actions() {
+         ]
+     );
+ }
++
++mod user_unit_font_properties {
++    use super::*;
++    use egui::accesskit::{Role, Toggled};
++    use egui_kittest::kittest::NodeT;
++    use pdfcraft_cos::{Document, Object, SaveOptions};
++    use pdfcraft_engine::{Edit, FieldProps, FieldValue};
++    use std::sync::Arc;
++
++    fn app(unit: f64, raw_size: f64) -> PdfCraftApp {
++        app_with_page(unit, raw_size, false)
++    }
++
++    fn app_with_page(unit: f64, raw_size: f64, tiny: bool) -> PdfCraftApp {
++        let mut doc = Document::open(Arc::new(include_bytes!("data/form.pdf").to_vec())).unwrap();
++        let page = pdfcraft_model::pages(&doc)[0].obj;
++        doc.update_dict(page, |d| {
++            d.set(b"UserUnit".to_vec(), Object::Real(unit));
++            if tiny {
++                let bounds = Object::Array(vec![Object::Int(0), Object::Int(0), Object::Int(1), Object::Int(1)]);
++                d.set(b"MediaBox".to_vec(), bounds.clone());
++                d.set(b"CropBox".to_vec(), bounds);
++            }
++        })
++        .unwrap();
++        if tiny {
++            // The fixture's last annotation is city; seed its input rectangle directly.
++            // Prepare's minimum authoring size does not constrain existing PDF widgets.
++            let widget = doc.get(page).as_dict().unwrap().get(b"Annots").unwrap().as_array().unwrap().last().unwrap().as_ref().unwrap();
++            let rect = Object::Array([0.1, 0.2, 0.9, 0.8].into_iter().map(Object::Real).collect());
++            doc.update_dict(widget, |d| d.set(b"Rect".to_vec(), rect)).unwrap();
++        }
++        let bytes = pdfcraft_cos::write_full(&doc, &SaveOptions::default()).unwrap();
++        let mut app = PdfCraftApp::new();
++        app.open_bytes("unit-form.pdf", None, bytes).unwrap();
++        // The engine property remains raw DA units; only the Properties UI converts points.
++        assert!(app.apply_edit(Edit::SetFieldProps {
++            name: "city".into(),
++            props: Box::new(FieldProps { font_size: Some(raw_size), ..Default::default() }),
++        }));
++        app
++    }
++
++    fn tf_size(text: &str) -> f64 {
++        let words: Vec<_> = text.split_whitespace().collect();
++        words.windows(2).rev().find(|pair| pair[1] == "Tf").unwrap()[0].parse().unwrap()
++    }
++
++    #[test]
++    fn properties_read_and_save_explicit_physical_font_points() {
++        for (unit, original_raw, expected_raw) in [(0.5, 36.0, 24.0), (1.0, 18.0, 12.0), (2.0, 9.0, 6.0)] {
++            let mut app = app(unit, original_raw);
++            let id = app.views[0].id;
++            let original_rect = app.session.get(id).unwrap().form.iter().find(|f| f.name == "city").unwrap().widgets[0].rect;
++            app.open_field_props("city", 0);
++            let draft = app.field_props.as_mut().unwrap();
++            assert_eq!(draft.font_size, 18.0, "existing field is displayed in physical points");
++            assert!(draft.props().is_none(), "opening Properties must not rewrite DA");
++            draft.font_size = 12.0;
++            let props = draft.props().unwrap();
++            assert_eq!(props.font_size, Some(expected_raw), "12 physical points must convert once");
++            assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
++            assert!(app.apply_edit(Edit::SetFieldValue { name: "city".into(), value: FieldValue::Text("Edited12".into()) }));
++            let bytes = app.session.save_bytes(id).unwrap();
++            let mut reopened = PdfCraftApp::new();
++            reopened.open_bytes("saved-unit-form.pdf", None, bytes.as_ref().clone()).unwrap();
++            let saved = reopened.session.get(reopened.views[0].id).unwrap();
++            let field = saved.form.iter().find(|f| f.name == "city").unwrap();
++            assert_eq!(field.value, ["Edited12"]);
++            assert_eq!(field.widgets[0].rect, original_rect);
++            assert_eq!(tf_size(&field.da), expected_raw, "saved DA remains raw units");
++            let cos = Document::open(bytes).unwrap();
++            let widget = cos.get(field.widgets[0].obj);
++            let ap = cos.resolve(widget.as_dict().unwrap().get(b"AP").unwrap());
++            let normal = cos.resolve(ap.as_dict().unwrap().get(b"N").unwrap());
++            let Object::Stream(stream) = &*normal else { panic!("normal appearance") };
++            let appearance = String::from_utf8(stream.decoded().unwrap()).unwrap();
++            assert!(appearance.contains("(Edited12) Tj"));
++            assert_eq!(tf_size(&appearance), expected_raw, "regenerated appearance uses raw size once");
++            reopened.open_field_props("city", 0);
++            assert_eq!(reopened.field_props.as_ref().unwrap().font_size, 12.0);
++            assert!(reopened.field_props.as_ref().unwrap().props().is_none());
++        }
++    }
++
++    #[test]
++    fn properties_auto_zero_survives_readback_and_explicit_to_auto_changes() {
++        for unit in [0.5, 1.0, 2.0] {
++            let mut app = app(unit, 0.0);
++            app.open_field_props("city", 0);
++            let draft = app.field_props.as_ref().unwrap();
++            assert_eq!(draft.font_size, 0.0);
++            assert!(draft.props().is_none());
++            // An unrelated property edit must leave the raw Auto sentinel alone.
++            app.field_props.as_mut().unwrap().tooltip = "Auto field".into();
++            let props = app.field_props.as_ref().unwrap().props().unwrap();
++            assert_eq!(props.font_size, None);
++            assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
++            app.open_field_props("city", 0);
++            app.field_props.as_mut().unwrap().font_size = 12.0;
++            let props = app.field_props.as_ref().unwrap().props().unwrap();
++            assert_eq!(props.font_size, Some(12.0 / unit));
++            assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
++            app.open_field_props("city", 0);
++            app.field_props.as_mut().unwrap().font_size = 0.0;
++            let props = app.field_props.as_ref().unwrap().props().unwrap();
++            assert_eq!(props.font_size, Some(0.0));
++            assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
++            let bytes = app.session.save_bytes(app.views[0].id).unwrap();
++            let mut reopened = PdfCraftApp::new();
++            reopened.open_bytes("auto-unit-form.pdf", None, bytes.as_ref().clone()).unwrap();
++            let saved = reopened.session.get(reopened.views[0].id).unwrap();
++            assert_eq!(tf_size(&saved.form.iter().find(|f| f.name == "city").unwrap().da), 0.0);
++            reopened.open_field_props("city", 0);
++            assert_eq!(reopened.field_props.as_ref().unwrap().font_size, 0.0);
++            assert!(reopened.field_props.as_ref().unwrap().props().is_none());
++        }
++    }
++
++    #[test]
++    fn properties_auto_toggle_chooses_twelve_physical_points() {
++        for (unit, raw) in [(0.5, 24.0), (1.0, 12.0), (2.0, 6.0)] {
++            let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
++                let mut app = app(unit, 0.0);
++                app.open_field_props("city", 0);
++                app
++            });
++            h.run_steps(3);
++            h.get_by_label("Appearance").click();
++            h.run_steps(2);
++            assert_eq!(h.state().field_props.as_ref().unwrap().font_size, 0.0, "painting Appearance preserves Auto");
++            assert!(h.state().field_props.as_ref().unwrap().props().is_none());
++            assert_eq!(h.get_by_label("Auto").accesskit_node().toggled(), Some(Toggled::True));
++            assert!(h.get_by_role(Role::SpinButton).accesskit_node().is_disabled());
++            h.get_by_label("Auto").click();
++            h.run_steps(2);
++            let draft = h.state().field_props.as_ref().unwrap();
++            assert_eq!(draft.font_size, 12.0);
++            assert_eq!(draft.props().unwrap().font_size, Some(raw));
++            h.get_by_label("Auto").click();
++            h.run_steps(2);
++            let draft = h.state().field_props.as_ref().unwrap();
++            assert_eq!(draft.font_size, 0.0);
++            assert!(draft.props().is_none(), "returning to Auto leaves the original DA unchanged");
++        }
++    }
++
++    #[test]
++    fn properties_on_subpoint_pages_use_explicit_user_unit() {
++        let mut app = app_with_page(0.5, 12.0, true);
++        let id = app.views[0].id;
++        let rect = [0.1, 0.2, 0.9, 0.8];
++        assert_eq!(app.session.get(id).unwrap().form.iter().find(|f| f.name == "city").unwrap().widgets[0].rect, rect);
++        let page = &app.session.get(id).unwrap().info.pages[0];
++        assert_eq!(page.crop, [0.0, 0.0, 1.0, 1.0]);
++        // Keep the existing tiny-page layout policy, without mistaking it for the PDF unit.
++        assert_eq!((page.width, page.height), (612.0, 792.0));
++        assert_eq!(page.user_unit, 0.5);
++        app.open_field_props("city", 0);
++        let draft = app.field_props.as_mut().unwrap();
++        assert_eq!(draft.font_size, 6.0);
++        assert!(draft.props().is_none());
++        draft.font_size = 12.0;
++        let props = draft.props().unwrap();
++        assert_eq!(props.font_size, Some(24.0));
++        assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
++        assert!(app.apply_edit(Edit::SetFieldValue { name: "city".into(), value: FieldValue::Text("Tiny12".into()) }));
++        let bytes = app.session.save_bytes(id).unwrap();
++        let mut reopened = PdfCraftApp::new();
++        reopened.open_bytes("saved-tiny-unit-form.pdf", None, bytes.as_ref().clone()).unwrap();
++        let saved = reopened.session.get(reopened.views[0].id).unwrap();
++        assert_eq!(saved.info.pages[0].user_unit, 0.5);
++        assert_eq!((saved.info.pages[0].width, saved.info.pages[0].height), (612.0, 792.0));
++        let field = saved.form.iter().find(|f| f.name == "city").unwrap();
++        assert_eq!(field.value, ["Tiny12"]);
++        assert_eq!(field.widgets[0].rect, rect);
++        assert_eq!(tf_size(&field.da), 24.0);
++        let cos = Document::open(bytes).unwrap();
++        let widget = cos.get(field.widgets[0].obj);
++        let ap = cos.resolve(widget.as_dict().unwrap().get(b"AP").unwrap());
++        let normal = cos.resolve(ap.as_dict().unwrap().get(b"N").unwrap());
++        let Object::Stream(stream) = &*normal else { panic!("normal appearance") };
++        let appearance = String::from_utf8(stream.decoded().unwrap()).unwrap();
++        assert!(appearance.contains("(Tiny12) Tj"));
++        assert_eq!(tf_size(&appearance), 24.0);
++        reopened.open_field_props("city", 0);
++        assert_eq!(reopened.field_props.as_ref().unwrap().font_size, 12.0);
++        assert!(reopened.field_props.as_ref().unwrap().props().is_none());
++    }
++
++    #[test]
++    fn properties_small_user_units_preserve_raw_font_size_changes() {
++        let mut app = app(1e-8, 12.0);
++        let id = app.views[0].id;
++        let doc = app.session.get(id).unwrap();
++        let unit = doc.info.pages[0].user_unit as f64;
++        assert_eq!(unit, 1e-8_f32 as f64);
++        assert_eq!((doc.info.pages[0].width, doc.info.pages[0].height), (612.0, 792.0));
++        let rect = doc.form.iter().find(|f| f.name == "city").unwrap().widgets[0].rect;
++        app.open_field_props("city", 0);
++        let draft = app.field_props.as_mut().unwrap();
++        assert_eq!(draft.font_size, 12.0 * unit);
++        assert!(draft.props().is_none(), "opening Properties remains a no-op");
++        draft.font_size = 24.0 * unit;
++        assert!((draft.font_size - 12.0 * unit).abs() < 1e-6, "physical delta exposes the previous tolerance bug");
++        let props = draft.props().expect("raw12 to raw24 must remain an edit at small physical scales");
++        assert_eq!(props.font_size, Some(24.0));
++        assert!(app.apply_edit(Edit::SetFieldProps { name: "city".into(), props: Box::new(props) }));
++        assert!(app.apply_edit(Edit::SetFieldValue { name: "city".into(), value: FieldValue::Text("Raw24".into()) }));
++        let bytes = app.session.save_bytes(id).unwrap();
++        let mut reopened = PdfCraftApp::new();
++        reopened.open_bytes("saved-small-unit-form.pdf", None, bytes.as_ref().clone()).unwrap();
++        let saved = reopened.session.get(reopened.views[0].id).unwrap();
++        assert_eq!(saved.info.pages[0].user_unit as f64, unit);
++        let field = saved.form.iter().find(|f| f.name == "city").unwrap();
++        assert_eq!(field.value, ["Raw24"]);
++        assert_eq!(field.widgets[0].rect, rect);
++        assert_eq!(tf_size(&field.da), 24.0);
++        let cos = Document::open(bytes).unwrap();
++        let widget = cos.get(field.widgets[0].obj);
++        let ap = cos.resolve(widget.as_dict().unwrap().get(b"AP").unwrap());
++        let normal = cos.resolve(ap.as_dict().unwrap().get(b"N").unwrap());
++        let Object::Stream(stream) = &*normal else { panic!("normal appearance") };
++        let appearance = String::from_utf8(stream.decoded().unwrap()).unwrap();
++        assert!(appearance.contains("(Raw24) Tj"));
++        assert_eq!(tf_size(&appearance), 24.0);
++        reopened.open_field_props("city", 0);
++        let draft = reopened.field_props.as_mut().unwrap();
++        assert_eq!(draft.font_size, 24.0 * unit);
++        assert!(draft.props().is_none(), "reopened Properties remains a no-op");
++        draft.font_size = 0.0;
++        assert_eq!(draft.props().unwrap().font_size, Some(0.0), "Auto zero must also remain an edit");
++    }
++
++    #[test]
++    fn properties_font_control_preserves_unedited_values_and_edit_bounds() {
++        for (unit, raw) in [(1e-4, 12.0), (1e-8, 12.0), (1.0, 12.0), (1.0, 18.0)] {
++            let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
++                let mut app = app(unit, raw);
++                app.open_field_props("city", 0);
++                app
++            });
++            h.run_steps(3);
++            h.get_by_label("Appearance").click();
++            h.run_steps(2);
++            let original = h.state().field_props.as_ref().unwrap().font_size;
++            assert_eq!(h.get_all_by_role(Role::SpinButton).count(), 1);
++            assert!(h.state().field_props.as_ref().unwrap().props().is_none());
++            h.get_by_role(Role::SpinButton).focus();
++            h.run_steps(2);
++            assert!(h.get_by_role(Role::SpinButton).is_focused());
++            assert_eq!(h.state().field_props.as_ref().unwrap().font_size, original);
++            // Blur while Appearance stays mounted, exercising DragValue's text commit.
++            h.get_by_label("Appearance").focus();
++            h.run_steps(2);
++            assert!(!h.get_by_role(Role::SpinButton).is_focused());
++            assert_eq!(h.state().field_props.as_ref().unwrap().font_size, original);
++            assert!(h.state().field_props.as_ref().unwrap().props().is_none(), "focus/blur is not a font edit");
++        }
++
++        for (raw, key) in [(100.0, egui::Key::ArrowUp), (2.0, egui::Key::ArrowDown)] {
++            let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
++                let mut app = app(1.0, raw);
++                app.open_field_props("city", 0);
++                app
++            });
++            h.run_steps(3);
++            h.get_by_label("Appearance").click();
++            h.run_steps(2);
++            h.get_by_role(Role::SpinButton).focus();
++            h.run_steps(2);
++            assert!(h.get_by_role(Role::SpinButton).is_focused());
++            h.key_press(key);
++            h.run_steps(2);
++            assert_eq!(h.state().field_props.as_ref().unwrap().font_size, raw, "keyboard edits respect the raw bounds");
++            h.get_by_label("General").click();
++            h.run_steps(2);
++            assert_eq!(h.state().field_props.as_ref().unwrap().font_size, raw);
++            assert!(h.state().field_props.as_ref().unwrap().props().is_none());
++        }
++    }
++}
+diff --git a/vendor/README.md b/vendor/README.md
+index 408621f..671c065 100644
+--- a/vendor/README.md
++++ b/vendor/README.md
+@@ -18,3 +18,5 @@ the fix. Vendoring copyleft code is never allowed (plan/adr/0001).
+ Temporary: hayro is the bootstrap renderer and lopdf the bootstrap inspector (ADR-0004); M2.6 replaces them with our own devices and `cos`/`model`.
+ 
+ Text extraction: hayro-interpret exposes `OutlineGlyph::is_vertical` from a Type0 font’s CMap writing mode. PdfCraft follows negative glyph-space y for WMode 1 so upright vertical columns can be searched (#126).
++
++Page units: hayro-syntax applies page-local `/UserUnit` to physical display dimensions and the completed crop/rotation transform once. Covered by `pdfcraft-render` `user_unit_tests::physical_geometry_raster_and_text_scale_once_with_local_user_units`.
+diff --git a/vendor/hayro-syntax/src/page.rs b/vendor/hayro-syntax/src/page.rs
+index b36ed4c..09ab8c0 100644
+--- a/vendor/hayro-syntax/src/page.rs
++++ b/vendor/hayro-syntax/src/page.rs
+@@ -324,8 +324,23 @@ impl<'a> Page<'a> {
+     /// Return the with and height of the page that should be assumed when rendering the page.
+     ///
+     /// Depending on the document, it is either based on the media box or the crop box
+-    /// of the page. In addition to that, it also takes the rotation of the page into account.
++    /// of the page, after rotation and the local UserUnit, in physical 1/72-inch points.
+     pub fn render_dimensions(&self) -> (f32, f32) {
++        // PdfCraft patch: physical display points include the page-local UserUnit.
++        let (w, h) = self.rotated_dimensions();
++        let unit = self.user_unit();
++        (w * unit, h * unit)
++    }
++
++    /// The page-local user-space unit in multiples of 1/72 inch (supported: >0 to 75000).
++    pub fn user_unit(&self) -> f32 {
++        // UserUnit is not inheritable; malformed values keep the default unit.
++        self.inner.get::<f32>(USER_UNIT)
++            .filter(|u| u.is_finite() && *u > 0.0 && *u <= 75_000.0)
++            .unwrap_or(1.0)
++    }
++
++    fn rotated_dimensions(&self) -> (f32, f32) {
+         let (mut base_width, mut base_height) = self.base_dimensions();
+ 
+         if matches!(
+@@ -362,11 +377,11 @@ impl<'a> Page<'a> {
+     ///
+     /// This accounts for the mismatch between PDF's y-up and most renderers'
+     /// y-down coordinate system, the rotation of the page and the offset of
+-    /// the crop box.
++    /// the crop box, and the page-local UserUnit scale.
+     pub fn initial_transform(&self, invert_y: bool) -> Transform {
+         let crop_box = self.intersected_crop_box();
+         let (_, base_height) = self.base_dimensions();
+-        let (width, height) = self.render_dimensions();
++        let (width, height) = self.rotated_dimensions();
+ 
+         let horizontal_t = Transform::ROTATE_CW_90 * Transform::translate((0.0, -width as f64));
+         let flipped_horizontal_t =
+@@ -399,7 +414,9 @@ impl<'a> Page<'a> {
+             Transform::IDENTITY
+         };
+ 
+-        rotation_transform
++        // PdfCraft patch: scale the completed raw crop/rotation mapping exactly once.
++        Transform::scale(self.user_unit() as f64)
++            * rotation_transform
+             * inversion_transform
+             * Transform::translate((-crop_box.x0, -crop_box.y0))
+     }

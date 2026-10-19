@@ -1,0 +1,656 @@
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 1f774cd5..c5980920 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -142,6 +142,7 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
+ 
+ ## Progress log
+ 
++- **2026-10-13 (M10, document print scaling):** Print initializes Actual size for document `/PrintScaling /None`; omitted or null optional `doc_print` layout uses Actual size, while explicit layouts and engine print settings remain authoritative. Manual handling and sizing choices are remembered separately from document initialization. Synthetic reader, dialog and output-placement regressions cover the precedence. Estimates unchanged.
+ - **2026-10-12 (M7, #1316):** Replacing a line or paragraph no longer removes a distinct neighbour whose glyph box overlaps the edited line. A second drawing is removed only when it also sits on the same baseline, so fake-bold and invisible copies still go. Synthetic regressions cover 6 pt leading, the same word on the next line, ordinary spacing, a separate paragraph, same-position copies, and incremental and full save/reopen. Estimates unchanged.
+ - **2026-10-12 (M1, #1339):** An incremental save of an unchanged classic-table file used to append `xref` and then `trailer` with no subsection, which qpdf reports as a damaged file. The section now has a zero-length subsection, so no object entry changes and a trailer-only edit is still written. Estimates unchanged.
+ - **2026-10-12 (M12, auto-tag preview):** The engine and `accessibility_autotag_preview` propose paragraph and large-heading roles for bounded text blocks on one page, with locations and reasons. Every proposal needs review; images remain unclassified. No PDF tags are written yet. Synthetic tool tests cover normal text, a larger heading, bounds and unchanged source bytes. Estimates unchanged.
+diff --git a/crates/automation/src/printing.rs b/crates/automation/src/printing.rs
+index b9529dcf..f91a663c 100644
+--- a/crates/automation/src/printing.rs
++++ b/crates/automation/src/printing.rs
+@@ -49,7 +49,12 @@ impl Automation {
+         };
+         let pages = print::select_pages(count, a.opt_str("pages")?, &labels, subset, a.opt_bool("reverse")?.unwrap_or(false))
+             .map_err(|e| bad(e.to_string()))?;
+-        let layout = match a.opt_str("layout")?.unwrap_or("fit") {
++        let layout_name = match a.opt_str("layout")? {
++            Some(layout) => layout,
++            None if doc.print_scaling_none().map_err(failed)? => "actual",
++            None => "fit",
++        };
++        let layout = match layout_name {
+             "fit" => Layout::Size(SizeMode::Fit),
+             "actual" => Layout::Size(SizeMode::Actual),
+             "shrink" => Layout::Size(SizeMode::Shrink),
+diff --git a/crates/automation/src/tools.rs b/crates/automation/src/tools.rs
+index 6b742d26..93717b83 100644
+--- a/crates/automation/src/tools.rs
++++ b/crates/automation/src/tools.rs
+@@ -468,7 +468,7 @@ pub fn tools() -> Vec<ToolDef> {
+         t(
+             "doc_print",
+             "Print",
+-            "Print with Acrobat's Print dialog options, or save the print-ready PDF. pages: a range such as \"1-3, 6, 9-\" (page labels allowed; default all); subset odd/even; reverse. layout: fit (default), actual, shrink, custom (scale %), multiple (per_sheet 2/4/6/9/16, order, border, auto_rotate; cut-stack order arranges single-sided sheets for cutting into piles and stacking left to right, top to bottom, keeping sheet order within each pile; duplex must be off), booklet (booklet_subset both/front/back, binding left/right), poster (scale %, overlap pt, cut_marks). orientation auto/portrait/landscape; comments_forms document / document-and-markups (default) / document-and-stamps / form-fields-only; paper Letter/Legal/Tabloid, ARCH A/B/C/D/E1/E, ANSI C/D/E, or A0/A1/A2/A3/A4/A5 (short names or full preset labels); use layout actual for 100% in the print-ready PDF; printer drivers may still substitute paper or scale. Then path (save) or printer (a name or \"default\") with copies, collate, duplex off/long-edge/short-edge, grayscale, and options (driver options from printer_options, CUPS).",
++            "Print with Acrobat's Print dialog options, or save the print-ready PDF. pages: a range such as \"1-3, 6, 9-\" (page labels allowed; default all); subset odd/even; reverse. layout: fit, actual, shrink, custom (scale %), multiple (per_sheet 2/4/6/9/16, order, border, auto_rotate; cut-stack order arranges single-sided sheets for cutting into piles and stacking left to right, top to bottom, keeping sheet order within each pile; duplex must be off), booklet (booklet_subset both/front/back, binding left/right), poster (scale %, overlap pt, cut_marks). When optional layout is omitted or null, the document no-scaling preference selects actual; otherwise fit. An explicit layout overrides that default. orientation auto/portrait/landscape; comments_forms document / document-and-markups (default) / document-and-stamps / form-fields-only; paper Letter/Legal/Tabloid, ARCH A/B/C/D/E1/E, ANSI C/D/E, or A0/A1/A2/A3/A4/A5 (short names or full preset labels); use layout actual for 100% in the print-ready PDF; printer drivers may still substitute paper or scale. Then path (save) or printer (a name or \"default\") with copies, collate, duplex off/long-edge/short-edge, grayscale, and options (driver options from printer_options, CUPS).",
+         )
+         .with(schema(
+             json!({
+diff --git a/crates/automation/tests/automation.rs b/crates/automation/tests/automation.rs
+index ddfcecce..110164d8 100644
+--- a/crates/automation/tests/automation.rs
++++ b/crates/automation/tests/automation.rs
+@@ -5333,6 +5333,91 @@ fn clipped_image_bounds_and_text_edit_save_reopen_through_tools() {
+     assert_eq!(a.call("page_render", &json!({"doc":doc,"page":1,"dpi":72})).unwrap(), pixels);
+ }
+ 
++/// Original one-page 200x300 pt PDF, with direct or indirect viewer preferences and value.
++fn print_scaling_fixture(scaling: Option<&str>, indirect: bool) -> Vec<u8> {
++    let entry = scaling.map(|name| if indirect { "/PrintScaling 6 0 R".into() } else { format!("/PrintScaling /{name}") }).unwrap_or_default();
++    let preferences =
++        scaling.map(|_| if indirect { "/ViewerPreferences 5 0 R".into() } else { format!("/ViewerPreferences << {entry} >>") }).unwrap_or_default();
++    let content = "0 0 0 rg 20 30 40 50 re f";
++    let objects = [
++        format!("<< /Type /Catalog /Pages 2 0 R {preferences} >>"),
++        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 300] >>".into(),
++        "<< /Type /Page /Parent 2 0 R /Resources << >> /Contents 4 0 R >>".into(),
++        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
++        format!("<< {entry} >>"),
++        format!("/{}", scaling.unwrap_or("AppDefault")),
++    ];
++    let mut bytes = b"%PDF-1.7\n".to_vec();
++    let mut offsets = Vec::new();
++    for (i, object) in objects.iter().enumerate() {
++        offsets.push(bytes.len());
++        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
++    }
++    let xref = bytes.len();
++    bytes.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
++    for offset in offsets {
++        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
++    }
++    bytes.extend_from_slice(format!("trailer << /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
++    bytes
++}
++
++fn printed_placement(bytes: Vec<u8>) -> [f64; 6] {
++    let doc = pdfcraft_cos::Document::open(std::sync::Arc::new(bytes)).unwrap();
++    let pages = pdfcraft_model::pages(&doc);
++    assert_eq!(pages.len(), 1);
++    let contents = doc.resolve(pages[0].dict.get(b"Contents").unwrap());
++    let pdfcraft_cos::Object::Stream(stream) = contents.as_ref() else { panic!("print sheet content stream") };
++    let text = String::from_utf8(stream.decoded().unwrap()).unwrap();
++    let words: Vec<_> = text.split_whitespace().collect();
++    let matrix = words.windows(7).find(|words| words[6] == "cm").unwrap();
++    std::array::from_fn(|i| matrix[i].parse().unwrap())
++}
++
++fn assert_printed_placement(actual: [f64; 6], expected: [f64; 6]) {
++    for (actual, expected) in actual.into_iter().zip(expected) {
++        assert!((actual - expected).abs() < 0.0001, "print placement: {actual} != {expected}");
++    }
++}
++
++#[test]
++fn print_scaling_omitted_layout_uses_document_default_and_explicit_layout_wins() {
++    let dir = workdir("print-scaling");
++    let mut a = auto(&dir);
++    for (index, scaling, indirect, default) in [
++        (0, Some("None"), true, [1.0, 0.0, 0.0, 1.0, 206.0, 246.0]),
++        (1, Some("AppDefault"), false, [2.52, 0.0, 0.0, 2.52, 54.0, 18.0]),
++        (2, None, false, [2.52, 0.0, 0.0, 2.52, 54.0, 18.0]),
++        (3, Some("Unknown"), true, [2.52, 0.0, 0.0, 2.52, 54.0, 18.0]),
++    ] {
++        let name = format!("preset-{index}.pdf");
++        let bytes = print_scaling_fixture(scaling, indirect);
++        std::fs::write(dir.join(&name), &bytes).unwrap();
++        let doc = ok(&mut a, "doc_open", json!({"path": name}))["doc"].as_u64().unwrap();
++        let before = ok(&mut a, "doc_info", json!({"doc": doc}))["document"].clone();
++        // Optional arguments treat null as absent, so both use the document's default.
++        for (layout, expected) in [
++            (None, default),
++            (Some(Value::Null), default),
++            (Some(json!("actual")), [1.0, 0.0, 0.0, 1.0, 206.0, 246.0]),
++            (Some(json!("fit")), [2.52, 0.0, 0.0, 2.52, 54.0, 18.0]),
++        ] {
++            let mut args = json!({"doc": doc, "paper": "Letter", "orientation": "portrait", "path": "printed.pdf"});
++            if let Some(layout) = layout {
++                args["layout"] = layout;
++            }
++            ok(&mut a, "doc_print", args);
++            assert_printed_placement(printed_placement(std::fs::read(dir.join("printed.pdf")).unwrap()), expected);
++        }
++        for layout in [json!(""), json!("unknown")] {
++            assert!(matches!(a.call("doc_print", &json!({"doc": doc, "layout": layout, "path": "refused.pdf"})), Err(ToolError::InvalidArgs(_))));
++        }
++        assert!(!dir.join("refused.pdf").exists());
++        assert_eq!(ok(&mut a, "doc_info", json!({"doc": doc}))["document"], before);
++        assert_eq!(std::fs::read(dir.join(name)).unwrap(), bytes, "reading print defaults does not rewrite the source");
++    }
++}
++
+ /// Independent inch/mm dimensions, checked in the saved file through the tool path.
+ #[test]
+ fn architectural_and_iso_papers_through_tools() {
+diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
+index 76bdc381..8761f4ea 100644
+--- a/crates/engine/src/lib.rs
++++ b/crates/engine/src/lib.rs
+@@ -569,6 +569,28 @@ impl Document {
+         self.editor.as_ref().map(|e| pdfcraft_organize::initial_view(&e.cos)).unwrap_or_default()
+     }
+ 
++    /// Whether the PDF requests no scaling when initializing Print (ISO 32000-1 Table 150).
++    /// Absent, AppDefault and unrecognized values use the caller's application default.
++    /// This read does not alter the document or override explicit print settings.
++    pub fn print_scaling_none(&self) -> Result<bool, EditError> {
++        let fallback;
++        let cos = match self.editor.as_ref() {
++            Some(e) => &e.cos,
++            None => {
++                fallback = pdfcraft_cos::Document::open_with_password(self.bytes.clone(), self.password.as_deref())
++                    .map_err(|e| EditError::Write(e.to_string()))?;
++                &fallback
++            }
++        };
++        let Some(root) = cos.root() else { return Ok(false) };
++        let catalog = cos.get(root);
++        let Some(preferences) = catalog.as_dict().and_then(|d| d.get(b"ViewerPreferences")).map(|o| cos.resolve(o)) else {
++            return Ok(false);
++        };
++        let scaling = preferences.as_dict().and_then(|d| d.get(b"PrintScaling")).map(|o| cos.resolve(o));
++        Ok(scaling.as_deref().and_then(pdfcraft_cos::Object::as_name) == Some(b"None".as_slice()))
++    }
++
+     /// Signed: at least one signature field holds a signature.
+     pub fn is_signed(&self) -> bool {
+         self.signatures.iter().any(|s| s.signed)
+diff --git a/crates/engine/src/tests.rs b/crates/engine/src/tests.rs
+index ff98c2df..bf48ef5c 100644
+--- a/crates/engine/src/tests.rs
++++ b/crates/engine/src/tests.rs
+@@ -1551,6 +1551,101 @@ fn redaction_marks_apply_for_good_and_undo() {
+     assert!(matches!(s.apply(id, Edit::ApplyRedactions { pages: None }), Err(EditError::Redact(_))));
+ }
+ 
++/// Original one-page 200x300 pt PDF, with direct or indirect viewer preferences and value.
++fn print_scaling_fixture(scaling: Option<&str>, indirect: bool) -> Vec<u8> {
++    let entry = scaling.map(|name| if indirect { "/PrintScaling 6 0 R".into() } else { format!("/PrintScaling /{name}") }).unwrap_or_default();
++    let preferences =
++        scaling.map(|_| if indirect { "/ViewerPreferences 5 0 R".into() } else { format!("/ViewerPreferences << {entry} >>") }).unwrap_or_default();
++    let content = "0 0 0 rg 20 30 40 50 re f";
++    let objects = [
++        format!("<< /Type /Catalog /Pages 2 0 R {preferences} >>"),
++        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 300] >>".into(),
++        "<< /Type /Page /Parent 2 0 R /Resources << >> /Contents 4 0 R >>".into(),
++        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
++        format!("<< {entry} >>"),
++        format!("/{}", scaling.unwrap_or("AppDefault")),
++    ];
++    let mut bytes = b"%PDF-1.7\n".to_vec();
++    let mut offsets = Vec::new();
++    for (i, object) in objects.iter().enumerate() {
++        offsets.push(bytes.len());
++        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
++    }
++    let xref = bytes.len();
++    bytes.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
++    for offset in offsets {
++        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
++    }
++    bytes.extend_from_slice(format!("trailer << /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
++    bytes
++}
++
++fn printed_placement(bytes: Vec<u8>) -> [f64; 6] {
++    let doc = pdfcraft_cos::Document::open(std::sync::Arc::new(bytes)).unwrap();
++    let pages = pdfcraft_model::pages(&doc);
++    assert_eq!(pages.len(), 1);
++    let contents = doc.resolve(pages[0].dict.get(b"Contents").unwrap());
++    let pdfcraft_cos::Object::Stream(stream) = contents.as_ref() else { panic!("print sheet content stream") };
++    let text = String::from_utf8(stream.decoded().unwrap()).unwrap();
++    let words: Vec<_> = text.split_whitespace().collect();
++    let matrix = words.windows(7).find(|words| words[6] == "cm").unwrap();
++    std::array::from_fn(|i| matrix[i].parse().unwrap())
++}
++
++fn assert_printed_placement(actual: [f64; 6], expected: [f64; 6]) {
++    for (actual, expected) in actual.into_iter().zip(expected) {
++        assert!((actual - expected).abs() < 0.0001, "print placement: {actual} != {expected}");
++    }
++}
++
++#[test]
++fn print_scaling_reader_resolves_preferences_without_editor_or_mutation() {
++    for (scaling, expected) in [(Some("None"), true), (Some("AppDefault"), false), (None, false), (Some("Unknown"), false)] {
++        for indirect in [false, true] {
++            let mut s = Session::new();
++            let id = s.open("preset.pdf", None, Arc::new(print_scaling_fixture(scaling, indirect)), None).unwrap();
++            let before = s.get(id).unwrap().bytes.clone();
++            assert_eq!(s.get(id).unwrap().print_scaling_none().unwrap(), expected);
++            s.docs.iter_mut().find(|doc| doc.id == id).unwrap().editor = None;
++            let doc = s.get(id).unwrap();
++            assert_eq!(doc.print_scaling_none().unwrap(), expected, "the viewer-only path still reads the PDF");
++            assert_eq!(doc.bytes, before);
++            assert!(!doc.dirty);
++            assert_eq!((doc.can_undo(), doc.can_redo()), (None, None));
++        }
++    }
++    let mut source = Session::new();
++    let id = source.open("encrypted-preset.pdf", None, Arc::new(print_scaling_fixture(Some("None"), true)), None).unwrap();
++    source
++        .apply(
++            id,
++            Edit::Protect(Protection { open_password: Some("reader".into()), permissions_password: Some("owner".into()), ..Default::default() }),
++        )
++        .unwrap();
++    let mut opened = Session::new();
++    let id = opened.open("encrypted-preset.pdf", None, source.save_bytes(id).unwrap(), Some("reader")).unwrap();
++    opened.docs.iter_mut().find(|doc| doc.id == id).unwrap().editor = None;
++    assert!(opened.get(id).unwrap().print_scaling_none().unwrap(), "readonly fallback uses the opened password");
++}
++
++#[test]
++fn explicit_print_settings_override_document_scaling() {
++    let mut s = Session::new();
++    let id = s.open("preset.pdf", None, Arc::new(print_scaling_fixture(Some("None"), true)), None).unwrap();
++    for (mode, expected) in
++        [(print::SizeMode::Actual, [1.0, 0.0, 0.0, 1.0, 206.0, 246.0]), (print::SizeMode::Fit, [2.52, 0.0, 0.0, 2.52, 54.0, 18.0])]
++    {
++        let settings = print::Settings {
++            pages: vec![0],
++            paper: (612.0, 792.0),
++            orientation: print::Orientation::Portrait,
++            layout: print::Layout::Size(mode),
++            ..Default::default()
++        };
++        assert_printed_placement(printed_placement(s.print_pdf(id, &settings).unwrap()), expected);
++    }
++}
++
+ #[test]
+ fn printing_lays_out_sheets_that_render() {
+     let (s, id) = session_with(5);
+diff --git a/crates/print/README.md b/crates/print/README.md
+index 18bf58ee..e15effab 100644
+--- a/crates/print/README.md
++++ b/crates/print/README.md
+@@ -54,6 +54,19 @@ sets copies, two-sided printing and colour. This crate stays free of web APIs.
+ Not yet: print as image, poster labels, PostScript output, colour conversion for
+ grayscale.
+ 
++## Document scaling defaults
++
++The Print dialog reads the current PDF's `/ViewerPreferences /PrintScaling` when it opens.
++`/None` initializes Size / Actual size; absent, `/AppDefault` and unrecognized values use the
++application's remembered manual handling and sizing. Automatic initialization is not remembered
++as a manual choice. Reopening the dialog reads the preset again; manual controls remain effective
++for the current print operation, including choices made before Cancel.
++
++`doc_print` with omitted or null optional `layout` selects actual for `/None`, otherwise fit,
++following the normal optional-argument semantics. An explicit layout string wins.
++The engine's fully resolved `print::Settings` are never rewritten by this preference. This covers
++the PDF 1.x default from ISO 32000-1 Table 150, not other print presets or PDF 2.0 Enforce.
++
+ ## Architectural sheets and scale
+ 
+ The Paper menu and `doc_print` share Letter, Legal, Tabloid, A3/A4/A5 plus
+diff --git a/crates/ui-egui/src/dialogs.rs b/crates/ui-egui/src/dialogs.rs
+index 499d0e4f..6a00ec51 100644
+--- a/crates/ui-egui/src/dialogs.rs
++++ b/crates/ui-egui/src/dialogs.rs
+@@ -794,10 +794,11 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
+                 );
+                 let view = &mut app.views[i];
+                 view.queue_print_previews(&rasters);
+-                let (go, cancel) = crate::print_ui::body(ui, &mut app.print_draft, &t, &sizes, &labels, &mut |p| {
+-                    view.need_thumbnail(p, true);
+-                    view.page_preview(p)
+-                });
++                let (go, cancel) =
++                    crate::print_ui::body(ui, &mut app.print_draft, &mut app.print_tasks.manual_defaults, &t, &sizes, &labels, &mut |p| {
++                        view.need_thumbnail(p, true);
++                        view.page_preview(p)
++                    });
+                 print_go = go;
+                 close = go || cancel;
+                 return;
+diff --git a/crates/ui-egui/src/print_ui.rs b/crates/ui-egui/src/print_ui.rs
+index b91a138d..1bd77cb9 100644
+--- a/crates/ui-egui/src/print_ui.rs
++++ b/crates/ui-egui/src/print_ui.rs
+@@ -191,6 +191,8 @@ pub fn system_printers() -> PrinterSource {
+ /// spooled (the printer each was sent to, and the spooler's answer).
+ #[derive(Default)]
+ pub(crate) struct PrintTasks {
++    /// Manual handling and sizing remembered while a document preset seeds this dialog.
++    pub(crate) manual_defaults: Option<(Handling, SizeMode)>,
+     #[cfg(not(target_arch = "wasm32"))]
+     printers: Option<std::sync::mpsc::Receiver<Vec<spool::Printer>>>,
+     #[cfg(not(target_arch = "wasm32"))]
+@@ -232,7 +234,15 @@ fn default_printer(printers: &[spool::Printer]) -> Option<String> {
+ 
+ impl PdfCraftApp {
+     pub fn open_print(&mut self) {
+-        let Some((i, _)) = self.active_ids() else { return };
++        let Some((i, id)) = self.active_ids() else { return };
++        let Some(doc) = self.session.get(id) else { return };
++        let no_scaling = match doc.print_scaling_none() {
++            Ok(value) => value,
++            Err(error) => {
++                self.notify_error(error);
++                return;
++            }
++        };
+         let (printers, printers_loading) = match self.printer_source.clone() {
+             // The list from the last time the dialog opened, until the fresh one arrives.
+             #[cfg(not(target_arch = "wasm32"))]
+@@ -245,7 +255,21 @@ impl PdfCraftApp {
+         let default = default_printer(&printers);
+         let current = self.views[i].current;
+         let selected: Vec<usize> = self.views[i].selected.iter().copied().collect();
+-        let keep = std::mem::take(&mut self.print_draft);
++        let mut keep = std::mem::take(&mut self.print_draft);
++        if let Some((handling, size)) = self.print_tasks.manual_defaults.take() {
++            // Restore each manual field independently; direct draft changes also survive.
++            if keep.handling == Handling::Size {
++                keep.handling = handling;
++            }
++            if keep.size == SizeMode::Actual {
++                keep.size = size;
++            }
++        }
++        if no_scaling {
++            self.print_tasks.manual_defaults = Some((keep.handling, keep.size));
++            keep.handling = Handling::Size;
++            keep.size = SizeMode::Actual;
++        }
+         // Picked pages are what Print is for (Acrobat's "Selected pages"); without any, a choice
+         // left over from another document falls back to the whole document.
+         let which = match (selected.is_empty(), keep.which) {
+@@ -643,6 +667,7 @@ fn combo<T: PartialEq + Copy>(ui: &mut egui::Ui, id: &str, value: &mut T, choice
+ pub(crate) fn body(
+     ui: &mut egui::Ui,
+     d: &mut PrintDraft,
++    manual_defaults: &mut Option<(Handling, SizeMode)>,
+     t: &Tokens,
+     sizes: &[(f64, f64)],
+     labels: &[String],
+@@ -766,6 +791,9 @@ pub(crate) fn body(
+                         d.handling = Handling::Size;
+                         d.size = SizeMode::Actual;
+                         d.orientation = Orientation::Auto;
++                        if let Some(defaults) = manual_defaults.as_mut() {
++                            *defaults = (d.handling, d.size);
++                        }
+                         d.sheet = 0;
+                     }
+                 });
+@@ -811,6 +839,9 @@ pub(crate) fn body(
+                 ] {
+                     if widgets::mode_tab(ui, label, d.handling == h).clicked() {
+                         d.handling = h;
++                        if let Some((handling, _)) = manual_defaults.as_mut() {
++                            *handling = h;
++                        }
+                         d.sheet = 0;
+                     }
+                 }
+@@ -819,16 +850,31 @@ pub(crate) fn body(
+             match d.handling {
+                 Handling::Size => {
+                     ui.horizontal(|ui| {
+-                        widgets::radio_value(ui, &mut d.size, SizeMode::Fit, tl!("Fit"));
+-                        widgets::radio_value(ui, &mut d.size, SizeMode::Actual, tl!("Actual size"));
+-                        widgets::radio_value(ui, &mut d.size, SizeMode::Shrink, tl!("Shrink oversized pages"));
++                        for (mode, label) in [
++                            (SizeMode::Fit, tl!("Fit")),
++                            (SizeMode::Actual, tl!("Actual size")),
++                            (SizeMode::Shrink, tl!("Shrink oversized pages")),
++                        ] {
++                            if widgets::radio_value(ui, &mut d.size, mode, label).clicked()
++                                && let Some((_, size)) = manual_defaults.as_mut()
++                            {
++                                *size = mode;
++                            }
++                        }
+                     });
+                     ui.horizontal(|ui| {
+                         let custom = matches!(d.size, SizeMode::Custom(_));
+                         if ui.add(widgets::radio(custom, tl!("Custom scale:"))).clicked() {
+                             d.size = SizeMode::Custom(d.custom_scale);
++                            if let Some((_, size)) = manual_defaults.as_mut() {
++                                *size = d.size;
++                            }
++                        }
++                        if ui.add_enabled(custom, egui::DragValue::new(&mut d.custom_scale).range(1.0..=1000.0).suffix(" %")).changed()
++                            && let Some((_, size)) = manual_defaults.as_mut()
++                        {
++                            *size = d.size;
+                         }
+-                        ui.add_enabled(custom, egui::DragValue::new(&mut d.custom_scale).range(1.0..=1000.0).suffix(" %"));
+                     });
+                 }
+                 Handling::Poster => {
+diff --git a/crates/ui-egui/tests/print.rs b/crates/ui-egui/tests/print.rs
+index 739c04ee..2d4409b6 100644
+--- a/crates/ui-egui/tests/print.rs
++++ b/crates/ui-egui/tests/print.rs
+@@ -15,6 +15,184 @@ fn harness() -> Harness<'static, PdfCraftApp> {
+     h
+ }
+ 
++/// Original one-page 200x300 pt PDF, with direct or indirect viewer preferences and value.
++fn print_scaling_fixture(scaling: Option<&str>, indirect: bool) -> Vec<u8> {
++    let entry = scaling.map(|name| if indirect { "/PrintScaling 6 0 R".into() } else { format!("/PrintScaling /{name}") }).unwrap_or_default();
++    let preferences =
++        scaling.map(|_| if indirect { "/ViewerPreferences 5 0 R".into() } else { format!("/ViewerPreferences << {entry} >>") }).unwrap_or_default();
++    let content = "0 0 0 rg 20 30 40 50 re f";
++    let objects = [
++        format!("<< /Type /Catalog /Pages 2 0 R {preferences} >>"),
++        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 300] >>".into(),
++        "<< /Type /Page /Parent 2 0 R /Resources << >> /Contents 4 0 R >>".into(),
++        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
++        format!("<< {entry} >>"),
++        format!("/{}", scaling.unwrap_or("AppDefault")),
++    ];
++    let mut bytes = b"%PDF-1.7\n".to_vec();
++    let mut offsets = Vec::new();
++    for (i, object) in objects.iter().enumerate() {
++        offsets.push(bytes.len());
++        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
++    }
++    let xref = bytes.len();
++    bytes.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
++    for offset in offsets {
++        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
++    }
++    bytes.extend_from_slice(format!("trailer << /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
++    bytes
++}
++
++fn printed_placement(bytes: Vec<u8>) -> [f64; 6] {
++    let doc = pdfcraft_cos::Document::open(std::sync::Arc::new(bytes)).unwrap();
++    let pages = pdfcraft_model::pages(&doc);
++    assert_eq!(pages.len(), 1);
++    let contents = doc.resolve(pages[0].dict.get(b"Contents").unwrap());
++    let pdfcraft_cos::Object::Stream(stream) = contents.as_ref() else { panic!("print sheet content stream") };
++    let text = String::from_utf8(stream.decoded().unwrap()).unwrap();
++    let words: Vec<_> = text.split_whitespace().collect();
++    let matrix = words.windows(7).find(|words| words[6] == "cm").unwrap();
++    std::array::from_fn(|i| matrix[i].parse().unwrap())
++}
++
++fn assert_printed_placement(actual: [f64; 6], expected: [f64; 6]) {
++    for (actual, expected) in actual.into_iter().zip(expected) {
++        assert!((actual - expected).abs() < 0.0001, "print placement: {actual} != {expected}");
++    }
++}
++
++fn scaling_harness() -> Harness<'static, PdfCraftApp> {
++    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 1000.0)).build_eframe(|_| {
++        let mut app = PdfCraftApp::new();
++        app.set_option("language", "en").unwrap();
++        app.printer_source = Some(std::sync::Arc::new(|| Vec::new()));
++        app.open_bytes("none.pdf", None, print_scaling_fixture(Some("None"), true)).unwrap();
++        app.open_bytes("default.pdf", None, print_scaling_fixture(None, false)).unwrap();
++        app.active = Some(0);
++        app
++    });
++    h.run_steps(4);
++    assert_eq!(h.state().views.len(), 2);
++    h
++}
++
++fn open_scaling_print(h: &mut Harness<'static, PdfCraftApp>) {
++    assert!(h.state_mut().execute("print.dialog"));
++    h.run_steps(3);
++    assert_eq!(h.state().dialog, Some(Dialog::Print));
++}
++
++fn cancel_scaling_print(h: &mut Harness<'static, PdfCraftApp>) {
++    h.get_by_label("Cancel").click();
++    h.run_steps(2);
++    assert_eq!(h.state().dialog, None);
++}
++
++#[test]
++fn print_scaling_none_reinitializes_and_does_not_leak_into_another_document() {
++    use pdfcraft_engine::print::{Layout, SizeMode};
++    let mut h = scaling_harness();
++    let id = h.state().views[0].id;
++    let before = h.state().session.get(id).unwrap().bytes.clone();
++    open_scaling_print(&mut h);
++    assert_eq!(h.state().print_draft.size, SizeMode::Actual);
++    h.get_by_label("Fit").click();
++    h.run_steps(2);
++    assert_eq!(h.state().print_draft.settings(1, &[]).unwrap().layout, Layout::Size(SizeMode::Fit));
++    cancel_scaling_print(&mut h);
++    open_scaling_print(&mut h);
++    assert_eq!(h.state().print_draft.size, SizeMode::Actual, "each displayed dialog reads the current document preset");
++    cancel_scaling_print(&mut h);
++    h.get_by_label("default.pdf").click();
++    h.run_steps(2);
++    open_scaling_print(&mut h);
++    assert_eq!(h.state().print_draft.size, SizeMode::Fit, "automatic Actual is not the manual app default");
++    cancel_scaling_print(&mut h);
++    h.get_by_label("none.pdf").click();
++    h.run_steps(2);
++    assert_eq!(h.state().session.get(id).unwrap().bytes, before, "dialog initialization and manual choices do not edit the PDF");
++    // Replace this same DocId's contents: the next dialog must read the replacement, not a cache.
++    h.state_mut().session.reload(id, std::sync::Arc::new(print_scaling_fixture(Some("AppDefault"), false))).unwrap();
++    open_scaling_print(&mut h);
++    assert_eq!(h.state().print_draft.size, SizeMode::Fit);
++    cancel_scaling_print(&mut h);
++    let doc = h.state().session.get(id).unwrap();
++    assert!(!doc.dirty);
++    assert_eq!((doc.can_undo(), doc.can_redo()), (None, None));
++    assert_ne!(doc.bytes, before, "only the explicit replacement changed the source");
++}
++
++#[test]
++fn print_scaling_manual_handling_and_sizing_are_remembered_separately() {
++    use pdfcraft_engine::print::SizeMode;
++    use pdfcraft_ui_egui::PrintHandling;
++    let mut h = scaling_harness();
++    h.state_mut().print_draft.handling = PrintHandling::Multiple;
++    h.state_mut().print_draft.size = SizeMode::Shrink;
++    open_scaling_print(&mut h);
++    assert_eq!((h.state().print_draft.handling, h.state().print_draft.size), (PrintHandling::Size, SizeMode::Actual));
++    h.get_by_label("Poster").click();
++    h.run_steps(2);
++    cancel_scaling_print(&mut h);
++    h.get_by_label("default.pdf").click();
++    h.run_steps(2);
++    open_scaling_print(&mut h);
++    assert_eq!((h.state().print_draft.handling, h.state().print_draft.size), (PrintHandling::Poster, SizeMode::Shrink));
++    cancel_scaling_print(&mut h);
++    h.get_by_label("none.pdf").click();
++    h.run_steps(2);
++    open_scaling_print(&mut h);
++    // Clicking an already selected seeded radio is still an explicit manual choice.
++    h.get_by_label("Actual size").click();
++    h.run_steps(2);
++    cancel_scaling_print(&mut h);
++    h.get_by_label("default.pdf").click();
++    h.run_steps(2);
++    open_scaling_print(&mut h);
++    assert_eq!((h.state().print_draft.handling, h.state().print_draft.size), (PrintHandling::Poster, SizeMode::Actual));
++    cancel_scaling_print(&mut h);
++    h.get_by_label("none.pdf").click();
++    h.run_steps(2);
++    open_scaling_print(&mut h);
++    h.get_by_label("Size").click();
++    h.run_steps(2);
++    h.get_by_label("Custom scale:").click();
++    h.run_steps(2);
++    h.state_mut().print_draft.custom_scale = 73.0;
++    cancel_scaling_print(&mut h);
++    h.get_by_label("default.pdf").click();
++    h.run_steps(2);
++    open_scaling_print(&mut h);
++    assert_eq!(h.state().print_draft.handling, PrintHandling::Size);
++    assert_eq!(h.state().print_draft.settings(1, &[]).unwrap().layout, pdfcraft_engine::print::Layout::Size(SizeMode::Custom(73.0)));
++}
++
++#[test]
++fn print_scaling_manual_fit_changes_saved_print_placement() {
++    use pdfcraft_engine::print::Orientation;
++    let mut h = scaling_harness();
++    let id = h.state().views[0].id;
++    let before = h.state().session.get(id).unwrap().bytes.clone();
++    open_scaling_print(&mut h);
++    h.get_by_label("Fit").click();
++    h.run_steps(2);
++    let out = std::env::temp_dir().join(format!("pdfcraft-print-scaling-fit-{}.pdf", std::process::id()));
++    h.state_mut().print_draft.orientation = Orientation::Portrait;
++    h.state_mut().print_draft.printer = None;
++    h.state_mut().save_override = Some(out.to_string_lossy().into_owned());
++    h.run_steps(1);
++    h.get_by_label("Save as PDF").click();
++    h.run_steps(3);
++    assert_eq!(h.state().dialog, None);
++    assert_printed_placement(printed_placement(std::fs::read(&out).unwrap()), [2.52, 0.0, 0.0, 2.52, 54.0, 18.0]);
++    let doc = h.state().session.get(id).unwrap();
++    assert_eq!(doc.bytes, before);
++    assert!(!doc.dirty);
++    assert_eq!((doc.can_undo(), doc.can_redo()), (None, None));
++    let _ = std::fs::remove_file(out);
++}
++
+ #[test]
+ fn current_print_page_saves_the_viewed_page_when_labels_restart() {
+     // Five distinct painted pages, labelled i, ii, iii, 1, 2.
+diff --git a/docs/roadmap.md b/docs/roadmap.md
+index 32567e34..b6233db0 100644
+--- a/docs/roadmap.md
++++ b/docs/roadmap.md
+@@ -96,7 +96,7 @@ total matches the parity estimate.
+ | M7 | Content editing (text, images, header/footer, watermark) | 250–500 | 20% | 100–180 | Done: header & footer, watermarks, backgrounds, Bates; added text and images that stay editable (move, resize, format, rotate, flip, crop, replace); links (Link tool, Link Properties, create from URLs, remove all). Missing: editing existing text and images in place (the longest pole), image/PDF watermarks |
+ | M8 | Security + redaction | 100–180 | 68% | 15–30 | Done: opening protected documents, permissions, Protect Using Password, Remove security; redaction (mark text/areas/pages, Search & Redact with patterns, apply removing glyphs, image pixels, vectors, XObject content, annotations and fields, verification, full rewrite on save); Remove hidden information and Sanitize.<br>Done since: redaction codes (U.S. FOIA and Privacy Act sets as overlay text, in Redaction properties and `redact_mark`). Redaction cleans indirect and form structure references, preserving surviving form tags. Redaction retires inherited resource dictionaries, so a parent `/Pages` can't keep a removed XObject reachable; unredacted pages are left untouched. Missing: certificate security, custom redaction code sets and pattern locales, DCT re-encoding |
+ | M9 | Signatures (PAdES, validation) | 160–280 | 60% | 40–70 | Done: new `sign` crate (DER, X.509, CMS, PKCS #12 on RustCrypto; aws-lc-rs for RSA private keys); PAdES B-B signing (visible, invisible, existing fields, certification with DocMDP); validation with trust store and changes-after-signing classification; self-signed digital IDs; Signatures panel, message bar, sign dialogs; agent tools. Checked with pdfsig and OpenSSL.<br>Done since: macOS Keychain and Windows Current User Personal store signing (software-backed CNG keys), certificate viewer, signed documents protected from rewrites. Missing: timestamps (B-T), LTV (DSS, OCSP, CRL), FieldMDP, smart cards, PKCS #11 |
+-| M10 | OCR, create, export, print | 200–350 | 33% | 120–215 | Done: create from blank/text/PNG/JPEG/TIFF (multi-page)/GIF/BMP; export PNG/JPEG/TIFF and text; Print (Acrobat's sizing, n-up, booklet, poster, comments & forms, preview, the CUPS and Windows spoolers, print-ready PDF).<br>Done since: embedded/72/custom DPI choices for image imports; export all images; OCR (searchable image for pages, ranges and multiple files); single-sided cut-and-stack imposition with cut marks, through Print and doc_print; architectural/ANSI/large ISO sheet presets, Match page at 100% and PDF-scale preview (#599 follow-up); Create PDF from multiple files (PDFs, images and text, edited as pages in the grid); OCR can also read pictures on pages that have text, without adding that text twice (#1028). Done since: Word invoice export uses borderless inferred tables, floating positioned text/artwork only where text overlaps an image or is rotated, and per-page sizes, covered by synthetic invoice automation regressions (#773); printing on the web through the browser's print dialog, sheets drawn by PdfCraft (gap 4). Missing: OCR languages beyond Latin, editable-text OCR output, full Office layout fidelity/import |
++| M10 | OCR, create, export, print | 200–350 | 33% | 120–215 | Done: create from blank/text/PNG/JPEG/TIFF (multi-page)/GIF/BMP; export PNG/JPEG/TIFF and text; Print (Acrobat's sizing, n-up, booklet, poster, comments & forms, preview, the CUPS and Windows spoolers, print-ready PDF).<br>Done since: embedded/72/custom DPI choices for image imports; export all images; OCR (searchable image for pages, ranges and multiple files); single-sided cut-and-stack imposition with cut marks, through Print and doc_print; architectural/ANSI/large ISO sheet presets, Match page at 100% and PDF-scale preview (#599 follow-up); Create PDF from multiple files (PDFs, images and text, edited as pages in the grid); OCR can also read pictures on pages that have text, without adding that text twice (#1028). Done since: Word invoice export uses borderless inferred tables, floating positioned text/artwork only where text overlaps an image or is rotated, and per-page sizes, covered by synthetic invoice automation regressions (#773); printing on the web through the browser's print dialog, sheets drawn by PdfCraft (gap 4). Missing: OCR languages beyond Latin, editable-text OCR output, full Office layout fidelity/import<br>Done since: Document `/PrintScaling /None` initializes Actual size and omitted or null optional `doc_print` layout; explicit choices override it, and automatic initialization does not replace remembered manual handling/sizing. |
+ | M11 | Optimize, preflight, PDF/A/X/UA, print production | 200–350 | 18% | 80–140 | Done: new `optimize` crate: Reduce File Size and the PDF Optimizer (images measured where drawn, bicubic downsampling, JPEG/ZIP recompression only when smaller, discard objects and user data, Flate clean-up, resource merging, object streams). Missing: fonts and transparency panels, space audit, preflight, PDF/A/X/UA |
+ | M12 | Accessibility, compare, measure, search, XFA | 200–380 | 30% | 90–160 | Done: new `a11y` crate with the Accessibility Checker (all 32 rules, report, Fix/Skip/Explain, options dialog and results panel, agent tools). Locatable figure, annotation and form findings highlight their page bounds.<br>Done since: 2D distance, perimeter and area measurements with persistent viewport calibration, snapping, live information and CSV export; a bounded, text-only auto-tag proposal tool for one page. Missing: writing proposed tags and parent tree, field autotag, visual Tags/Order/Content panels, Reading Order tool, compare, geospatial/3D measurement, search index, XFA |
+ | M13 | Automation (MCP, Action Wizard, CLI) + AI providers | 60–120 | 45% | 25–45 | Done: MCP resources (document info, text, page images); headless tool table (123 tools incl. signing, optimizing, initial view, links, stamps, data exchange, comment review, forms authoring and scripts, redaction, sanitize, print, add content), opt-in MCP server over stdio, CLI `run`/`tools` (closed stdout pipes exit cleanly), UI control channel with drag. Missing: Action Wizard, AI providers<br>Done since: CLI run and MCP reject missing, empty, repeated and option-valued --root arguments before any tool/script execution or MCP initialization. A single-hyphen directory name remains valid; synthetic CLI regressions preserve a would-be overwritten file. `text_find` also caps the per-page match ranges it materializes at the remaining result limit plus one continuation match. |
+diff --git a/parity/acrobat-features.toml b/parity/acrobat-features.toml
+index 7d8e8703..3b8f455c 100644
+--- a/parity/acrobat-features.toml
++++ b/parity/acrobat-features.toml
+@@ -7972,8 +7972,8 @@ milestone = "M10"
+ status = "shipped"
+ commands = ["print.dialog"]
+ tools = ["doc_print"]
+-evidence = ["crates/print/src/tests.rs::size_modes", "crates/print/src/tests.rs::architectural_sheets_preserve_full_scale", "crates/automation/tests/automation.rs::architectural_and_iso_papers_through_tools", "crates/ui-egui/tests/print.rs::architectural_page_can_be_matched_at_100_percent"]
+-notes = "fit, actual size, shrink oversized, custom %; ARCH A/B/C/D/E1/E, ANSI C/D/E, ISO A0/A1/A2 presets; Match page at 100% matches the current page to a standard sheet. PDF scale shows the previewed source-to-sheet transform, not calibrated physical output; driver substitution/scaling remains possible"
++evidence = ["crates/print/src/tests.rs::size_modes", "crates/print/src/tests.rs::architectural_sheets_preserve_full_scale", "crates/automation/tests/automation.rs::architectural_and_iso_papers_through_tools", "crates/ui-egui/tests/print.rs::architectural_page_can_be_matched_at_100_percent", "crates/automation/tests/automation.rs::print_scaling_omitted_layout_uses_document_default_and_explicit_layout_wins", "crates/ui-egui/tests/print.rs::print_scaling_none_reinitializes_and_does_not_leak_into_another_document", "crates/ui-egui/tests/print.rs::print_scaling_manual_handling_and_sizing_are_remembered_separately", "crates/ui-egui/tests/print.rs::print_scaling_manual_fit_changes_saved_print_placement"]
++notes = "fit, actual size, shrink oversized, custom %; ARCH A/B/C/D/E1/E, ANSI C/D/E, ISO A0/A1/A2 presets; Match page at 100% matches the current page to a standard sheet. PDF scale shows the previewed source-to-sheet transform, not calibrated physical output; driver substitution/scaling remains possible; Document /ViewerPreferences /PrintScaling /None seeds Size/Actual on each Print dialog opening. Manual controls override the current operation; automatic initialization does not replace remembered app defaults. Omitted or null optional doc_print layout uses actual for None, otherwise fit; explicit layout wins. Document preset authoring, other document print presets and PDF 2.0 Enforce remain unimplemented"
+ 
+ [[feature]]
+ id = "print.paper-source-by-size"

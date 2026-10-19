@@ -1,0 +1,69 @@
+diff --git a/crates/engine/src/tests.rs b/crates/engine/src/tests.rs
+index 0ec09c2f..3df357d9 100644
+--- a/crates/engine/src/tests.rs
++++ b/crates/engine/src/tests.rs
+@@ -905,6 +905,64 @@ fn owner_password_of_older_revisions_opens_the_viewer_too() {
+     }
+ }
+ 
++/// Known owner passwords permit this metadata edit even when user modification is restricted.
++/// This authoring matrix covers R2, R3, R4 and R6; the R5 reader path needs separate evidence.
++#[test]
++fn encrypted_metadata_edits_rebase_and_reopen_for_each_authoring_algorithm() {
++    use pdfcraft_cos::Algorithm::{Aes128, Aes256, Rc4_40, Rc4_128};
++
++    const TITLE: &str = "Known-password compatibility title";
++    for (algorithm, method) in [(Rc4_40, "RC4, 40-bit"), (Rc4_128, "RC4, 128-bit"), (Aes128, "AES, 128-bit"), (Aes256, "AES, 256-bit")] {
++        let mut original = pdfcraft_cos::Document::open(Arc::new(fixture(2))).unwrap();
++        original
++            .set_encryption(&pdfcraft_cos::NewEncryption {
++                algorithm,
++                user_password: "user",
++                owner_password: "owner",
++                permissions: 0,
++                encrypt_metadata: true,
++                seed: [1; 32],
++            })
++            .unwrap();
++        let bytes = Arc::new(pdfcraft_cos::write_full(&original, &Default::default()).unwrap());
++        let mut session = Session::new().with_clock(|| 1_700_000_000);
++        let id = session.open("known-password.pdf", None, bytes.clone(), Some("owner")).unwrap();
++        let before = session.get(id).unwrap();
++        let permission_bits = before.permissions().unwrap().bits;
++        let security = before.security_summary().unwrap();
++        assert_eq!(security.method, method, "{algorithm:?}: original encryption method");
++        assert!(security.owner && before.allows_modification(), "{algorithm:?}: the known owner may edit metadata");
++        assert_eq!(page_texts(&session, id), ["Page 1", "Page 2"], "{algorithm:?}: original page content");
++
++        session.apply(id, Edit::SetInfo { key: "Title".into(), value: TITLE.into() }).unwrap();
++        assert_eq!(session.get(id).unwrap().info.title.as_deref(), Some(TITLE), "{algorithm:?}: live title");
++        let saved = session.save_bytes(id).unwrap();
++        assert!(saved.starts_with(bytes.as_slice()), "{algorithm:?}: the save preserves the original encrypted revision");
++        session.mark_saved(id, saved.clone(), None).unwrap();
++        let rebased = session.get(id).unwrap();
++        let security = rebased.security_summary().unwrap();
++        assert!(!rebased.dirty && rebased.info.encrypted, "{algorithm:?}: rebased encrypted document is clean");
++        assert_eq!(rebased.info.title.as_deref(), Some(TITLE), "{algorithm:?}: rebased title");
++        assert_eq!(security.method, method, "{algorithm:?}: rebased encryption method");
++        assert_eq!(rebased.permissions().unwrap().bits, permission_bits, "{algorithm:?}: rebasing preserves permission bits");
++        assert!(security.owner && rebased.allows_modification(), "{algorithm:?}: rebasing preserves owner state and modification rights");
++        assert_eq!(page_texts(&session, id), ["Page 1", "Page 2"], "{algorithm:?}: rebased page content");
++
++        let mut fresh = Session::new();
++        let reopened_id = fresh.open("reopened.pdf", None, saved, Some("owner")).unwrap();
++        let reopened = fresh.get(reopened_id).unwrap();
++        let security = reopened.security_summary().unwrap();
++        assert_eq!(reopened.info.title.as_deref(), Some(TITLE), "{algorithm:?}: reopened title");
++        assert!(
++            reopened.info.encrypted && security.owner && reopened.allows_modification(),
++            "{algorithm:?}: reopened owner state and modification rights"
++        );
++        assert_eq!(security.method, method, "{algorithm:?}: reopened encryption method");
++        assert_eq!(reopened.permissions().unwrap().bits, permission_bits, "{algorithm:?}: reopening preserves permission bits");
++        assert_eq!(page_texts(&fresh, reopened_id), ["Page 1", "Page 2"], "{algorithm:?}: reopened page content");
++    }
++}
++
+ #[test]
+ fn autosave_snapshots_only_changed_documents() {
+     let (mut s, id) = session_with(2);

@@ -1,0 +1,91 @@
+diff --git a/crates/engine/src/tests.rs b/crates/engine/src/tests.rs
+index 37cafd44..c8476ac4 100644
+--- a/crates/engine/src/tests.rs
++++ b/crates/engine/src/tests.rs
+@@ -1679,6 +1679,34 @@ fn form_refresh_keeps_first_value_when_field_names_repeat() {
+     assert_eq!(dup.as_deref(), Some("first"));
+ }
+ 
++#[test]
++fn multiselect_choice_indices_stay_sorted_through_engine_save_and_reopen() {
++    let (mut s, id) = session_with(1);
++    s.apply(
++        id,
++        Edit::AddField {
++            page: 0,
++            rect: [20.0, 180.0, 180.0, 240.0],
++            kind: NewField::List { options: vec!["Cheese".into(), "Ham".into(), "Olives".into()], multi: true },
++            name: Some("toppings".into()),
++        },
++    )
++    .unwrap();
++    let chosen = vec!["Olives".to_string(), "Ham".to_string()];
++    s.apply(id, Edit::SetFieldValue { name: "toppings".into(), value: FieldValue::Choice(chosen.clone()) }).unwrap();
++    assert_eq!(s.get(id).unwrap().form[0].value, chosen, "the live engine keeps selection order");
++    let saved = s.save_bytes(id).unwrap();
++    let cos = pdfcraft_cos::Document::open(saved.clone()).unwrap();
++    let all = pdfcraft_forms::fields(&cos);
++    let list = all.iter().find(|field| field.name == "toppings").unwrap();
++    let object = cos.get(list.obj);
++    let indices = object.as_dict().unwrap().get(b"I").unwrap().as_array().unwrap();
++    assert_eq!(indices.iter().map(|index| index.as_int().unwrap()).collect::<Vec<_>>(), [1, 2]);
++    assert_eq!(list.value, chosen, "sorted /I does not reorder /V");
++    let reopened = s.open("reopened.pdf", None, saved, None).unwrap();
++    assert_eq!(s.get(reopened).unwrap().form[0].value, chosen, "reopening keeps selection order");
++}
++
+ #[test]
+ fn preparing_a_form_adds_renames_and_deletes_fields() {
+     let (mut s, id) = session_with(1);
+diff --git a/crates/forms/src/lib.rs b/crates/forms/src/lib.rs
+index 337ae765..7aa1ae7a 100644
+--- a/crates/forms/src/lib.rs
++++ b/crates/forms/src/lib.rs
+@@ -1007,8 +1007,11 @@ fn write_value(doc: &mut Document, f: &Field, value: &FieldValue, scripts: &mut
+                     }
+                 }
+             }
+-            let indices: Vec<Object> =
++            let mut indices: Vec<Object> =
+                 exports.iter().filter_map(|e| f.options.iter().position(|(x, _)| x == e)).map(|i| Object::Int(i as i64)).collect();
++            // /I lists option indices in ascending order; /V keeps the caller's value order.
++            // Every entry above is an integer, so this sorts by its numeric option index.
++            indices.sort_unstable_by_key(Object::as_int);
+             doc.update_dict(f.obj, |d| {
+                 match exports.as_slice() {
+                     [] => {
+diff --git a/crates/forms/src/tests.rs b/crates/forms/src/tests.rs
+index 0256bfaf..8bab7618 100644
+--- a/crates/forms/src/tests.rs
++++ b/crates/forms/src/tests.rs
+@@ -607,6 +607,30 @@ fn choices_accept_exports_or_display_text() {
+     assert!(matches!(set_value(&mut doc, "country", &FieldValue::Choice(vec!["ca".into(), "fr".into()])), Err(FormError::Invalid(_))));
+ }
+ 
++#[test]
++fn multiselect_choice_indices_are_sorted_without_reordering_values() {
++    let mut forward_appearance = None;
++    for values in [["Ham", "Olives"], ["Olives", "Ham"]] {
++        let mut doc = fixture();
++        let chosen: Vec<String> = values.iter().map(|value| (*value).into()).collect();
++        set_value(&mut doc, "toppings", &FieldValue::Choice(chosen.clone())).unwrap();
++        let doc = reopen(&doc);
++        let all = fields(&doc);
++        let list = field(&all, "toppings");
++        assert_eq!(list.value, chosen, "saving preserves the caller's /V order");
++        let object = doc.get(list.obj);
++        let indices = object.as_dict().unwrap().get(b"I").unwrap().as_array().unwrap();
++        assert_eq!(indices.iter().map(|index| index.as_int().unwrap()).collect::<Vec<_>>(), [1, 2], "saved option indices are ascending");
++        let appearance = ap(&doc, &list.widgets[0]);
++        assert_eq!(appearance.matches("0.6 0.75 0.86 rg").count(), 2, "both selected rows stay highlighted");
++        if let Some(forward) = &forward_appearance {
++            assert_eq!(&appearance, forward, "the same selected rows have the same appearance in either selection order");
++        } else {
++            forward_appearance = Some(appearance);
++        }
++    }
++}
++
+ #[test]
+ fn errors_are_specific_and_change_nothing() {
+     let mut doc = fixture();

@@ -1,0 +1,128 @@
+diff --git a/crates/edit/src/tests.rs b/crates/edit/src/tests.rs
+index 8f3a9ea..b60d893 100644
+--- a/crates/edit/src/tests.rs
++++ b/crates/edit/src/tests.rs
+@@ -1396,3 +1396,58 @@ fn generated_cjk_fonts_reserve_imported_names_even_when_object_numbers_match() {
+         assert_eq!(metrics.decode(&[1]), "\u{65e5}");
+     }
+ }
++
++#[test]
++fn paragraph_reflow_preserves_quote_moves_and_spacing_for_untouched_text() {
++    for split_text_object in [false, true] {
++        for separate_pieces in [false, true] {
++            for double_quote in [false, true] {
++                let earlier = if split_text_object { "(Earlier) Tj 0 0 1 rg" } else { "" };
++                let (first, second, quote) = if double_quote { ("3 2 (First)", "7 4 (Second)", "\"") } else { ("(First)", "(Second)", "'") };
++                let prefix = format!("BT /F1 12 Tf 18 TL 72 700 Td {earlier} {first}");
++                let body = format!("{quote} {second} {quote}");
++                let tail = "1 0 0 rg (A A) ' ET";
++                let mut doc = text_page("");
++                // Pin the tail's advances explicitly instead of relying on the editor's
++                // approximate standard-font metrics when checking retained Tc and Tw.
++                doc.update_dict(pdfcraft_cos::ObjRef::new(5, 0), |font| {
++                    let mut widths = vec![Object::Int(500); 34];
++                    widths[0] = Object::Int(278);
++                    widths[33] = Object::Int(667);
++                    font.set(b"FirstChar".to_vec(), Object::Int(32));
++                    font.set(b"LastChar".to_vec(), Object::Int(65));
++                    font.set(b"Widths".to_vec(), Object::Array(widths));
++                })
++                .unwrap();
++                let refs = if separate_pieces {
++                    set_content_pieces(&mut doc, &[&prefix, &body, tail])
++                } else {
++                    set_content_pieces(&mut doc, &[&format!("{prefix} {body} {tail}")])
++                };
++                let blocks = text::text_blocks(&doc, 0).unwrap();
++                let target = blocks.iter().position(|b| b.text == "First Second").unwrap();
++                text::replace_block(&mut doc, 0, target, "Edited").unwrap();
++                if separate_pieces {
++                    assert_eq!(content_refs(&doc)[2], refs[2], "the untouched tail keeps its original object");
++                }
++                let doc = reopen(&doc);
++                let lines = text::text_lines(&doc, 0).unwrap();
++                assert!(!lines.iter().any(|l| l.text.contains("First") || l.text.contains("Second")));
++                let edited = lines.iter().find(|l| l.text == "Edited").unwrap();
++                assert_eq!(edited.origin_baseline(), 682.0);
++                let tail = lines.iter().find(|l| l.text == "A A").unwrap();
++                // Three quote moves of 18 pt from y=700 put the unedited tail at 646,
++                // including when reflow split the original BT after Earlier.
++                assert_eq!(tail.origin_baseline(), 646.0, "split={split_text_object}, pieces={separate_pieces}, double={double_quote}");
++                assert_eq!(tail.rect[0], 72.0);
++                // Helvetica A=667, space=278 units. The last double quote leaves
++                // Tc=4 for three characters and Tw=7 for the one space.
++                let expected_width = (667.0 * 2.0 + 278.0) * 12.0 / 1000.0 + if double_quote { 3.0 * 4.0 + 7.0 } else { 0.0 };
++                assert!((tail.rect[2] - tail.rect[0] - expected_width).abs() < 0.001, "{:?}", tail.rect);
++                if split_text_object {
++                    assert_eq!(lines.iter().find(|l| l.text == "Earlier").unwrap().origin_baseline(), 700.0);
++                }
++            }
++        }
++    }
++}
+diff --git a/crates/edit/src/text.rs b/crates/edit/src/text.rs
+index 4717c06..3370429 100644
+--- a/crates/edit/src/text.rs
++++ b/crates/edit/src/text.rs
+@@ -504,6 +504,20 @@ fn type3_font(doc: &mut Document, fonts_res: &mut Dict, text: &str) -> Result<Ty
+     pdfcraft_fonts::type3_font(doc, fonts_res, text).map_err(EditError::Invalid)
+ }
+ 
++/// Quote-show operators also change text state and move the line matrix. Removing
++/// their painted text must leave those effects for later, untouched operators.
++fn quote_side_effects(op: &Op) -> Vec<Op> {
++    match op.op.as_slice() {
++        b"'" => vec![Op::new("T*", vec![])],
++        b"\"" => vec![
++            Op::new("Tw", vec![op.operands.first().cloned().unwrap_or(Object::Int(0))]),
++            Op::new("Tc", vec![op.operands.get(1).cloned().unwrap_or(Object::Int(0))]),
++            Op::new("T*", vec![]),
++        ],
++        _ => Vec::new(),
++    }
++}
++
+ /// Replace the text of line `line` (an index into [`text_lines`]) on `page` with `text`.
+ pub fn replace_line(doc: &mut Document, page: usize, line: usize, text: &str) -> Result<LineEdit, EditError> {
+     let text = text.replace(['\n', '\r'], " ");
+@@ -520,17 +534,7 @@ pub fn replace_line(doc: &mut Document, page: usize, line: usize, text: &str) ->
+     let font = fonts_res.get(target.font.as_bytes()).and_then(|f| doc.resolve(f).as_dict().cloned()).map(|d| Metrics::from_dict(doc, &d));
+     let reused = font.as_ref().and_then(|m| m.encode(&text));
+     let mut substituted = None;
+-    let mut replacement: Vec<Op> = Vec::new();
+-    // ' and " also move to the next line; keep that.
+-    match first_op.op.as_slice() {
+-        b"'" => replacement.push(Op::new("T*", vec![])),
+-        b"\"" => {
+-            replacement.push(Op::new("Tw", vec![first_op.operands.first().cloned().unwrap_or(Object::Int(0))]));
+-            replacement.push(Op::new("Tc", vec![first_op.operands.get(1).cloned().unwrap_or(Object::Int(0))]));
+-            replacement.push(Op::new("T*", vec![]));
+-        }
+-        _ => {}
+-    }
++    let mut replacement = quote_side_effects(first_op);
+     match reused {
+         Some(bytes) => replacement.push(Op::new("Tj", vec![Object::String(PdfString::literal(bytes))])),
+         None => {
+@@ -965,8 +969,18 @@ fn rewrite_block_inner(doc: &mut Document, page: usize, block: usize, text: Opti
+     }
+     let at = if split { start } else { o.bt_op };
+     let contents = content.rewrite(doc, |i| {
+-        let insert = if i == at { std::mem::take(&mut block_ops) } else { Vec::new() };
+-        (insert, !drop.contains(&i))
++        let mut insert = if i == at { std::mem::take(&mut block_ops) } else { Vec::new() };
++        let removed = drop.contains(&i);
++        // A split restores the first show's post-quote state and line matrix above.
++        // Every other removed quote must still move the original line matrix and
++        // update spacing, or an untouched later run inherits a different state.
++        if removed
++            && !(split && i == start)
++            && let Some(op) = ops.get(i)
++        {
++            insert.extend(quote_side_effects(op));
++        }
++        (insert, !removed)
+     })?;
+     if new_font {
+         res.set(b"Font".to_vec(), Object::Dict(fonts_res));

@@ -1,0 +1,502 @@
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 44a26604..8a187362 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -141,6 +141,7 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
+ 
+ ## Progress log
+ 
++- **2026-10-12 (M3, page-label navigation candidate):** The page box displays logical labels and keeps the current page when its unchanged value is submitted, including duplicate labels. Editable-control regressions also cover numeric fallback, invalid input, active typing and focused same-document replacement with changed labels or fewer pages. Validation pending; estimates unchanged.
+ - **2026-10-12 (M1, #1339):** An incremental save of an unchanged classic-table file used to append `xref` and then `trailer` with no subsection, which qpdf reports as a damaged file. The section now has a zero-length subsection, so no object entry changes and a trailer-only edit is still written. Estimates unchanged.
+ - **2026-10-12 (M12, auto-tag preview):** The engine and `accessibility_autotag_preview` propose paragraph and large-heading roles for bounded text blocks on one page, with locations and reasons. Every proposal needs review; images remain unclassified. No PDF tags are written yet. Synthetic tool tests cover normal text, a larger heading, bounds and unchanged source bytes. Estimates unchanged.
+ - **2026-10-12 (M10, editing OCR text on scans):** Editing a recognised word on a scanned page now changes what the page shows. Before, the rewrite stayed invisible OCR text, so the scan still showed the old word; on a form, the whole OCR layer also grouped into one paragraph that rewrapped when one word changed. OCR words now group into phrases (a table cell or a tab stop splits them, and lines stay apart); an edit draws the phrase visibly in the scan's sampled ink colour over a cover in the sampled paper colour, keeping each word's width and growing rightwards. The editor covers the scanned word while typing. OCR words are now sized from their letters (a capitals-only word's box spans the cap height, not the full ascender-descender span), so recognised and rewritten text is as tall as the scanned word and sits on its baseline. Five engine tests on synthetic scans and a kittest UI test; `ocr.editable-text-output` is partial.
+diff --git a/crates/ui-egui/src/canvas.rs b/crates/ui-egui/src/canvas.rs
+index 1f9105e2..1b37fa91 100644
+--- a/crates/ui-egui/src/canvas.rs
++++ b/crates/ui-egui/src/canvas.rs
+@@ -682,7 +682,6 @@ impl DocView {
+         self.page_heights = info.pages.iter().map(|p| p.height).collect();
+         let last = self.page_count.saturating_sub(1);
+         self.current = self.current.min(last);
+-        self.page_input = (self.current + 1).to_string();
+         self.selected.retain(|p| *p <= last);
+         // Text being typed on a page that no longer exists goes with the page.
+         if self.content.draft.as_ref().is_some_and(|d| d.page > last || self.page_count == 0) {
+@@ -729,6 +728,7 @@ impl DocView {
+         *self = fresh;
+         // Marks the kept images out of date and clamps the page to the new page count.
+         self.document_changed(info);
++        self.page_input = self.current_page_label(info.pages.get(self.current).map(|page| page.label.as_str()));
+     }
+ 
+     /// Pages an organize command acts on: the selection, or the current page.
+@@ -1014,7 +1014,6 @@ impl DocView {
+         self.wheel.clear_motion();
+         self.goto = Some((page, 0.0));
+         self.current = page;
+-        self.page_input = (page + 1).to_string();
+     }
+ 
+     /// Go to a destination, a bookmark's or a link's (ISO 32000-2 §12.3.2.2): its page, scrolled
+@@ -1099,9 +1098,25 @@ impl DocView {
+         self.go_to_page(target);
+     }
+ 
+-    /// Go to the page typed in the page box: a page label (logical page numbers, as Acrobat
+-    /// does), else a page number. `false` when it names no page.
++    /// Page-editor focus and drafts belong to a document, even while another tab is active.
++    pub(crate) fn page_input_id(&self) -> egui::Id {
++        egui::Id::new(("page-input", self.id.0))
++    }
++
++    /// The idle page box and unchanged-input lookup share the same label fallback.
++    pub(crate) fn current_page_label(&self, label: Option<&str>) -> String {
++        label.filter(|l| !l.is_empty()).map(str::to_owned).unwrap_or_else(|| (self.current + 1).to_string())
++    }
++
++    /// Retain the current page when `typed` exactly matches its displayed label, even if
++    /// another page has that label. Otherwise resolve a trimmed label (case-insensitive),
++    /// then a physical page number. `false` when it names no page.
+     pub fn go_to_typed(&mut self, typed: &str, labels: &[String]) -> bool {
++        // Compare the displayed value before trimming: a label may itself contain spaces.
++        // Repeated labels occur in restarted sections and prefix-only ranges.
++        if self.current < self.page_count && self.current_page_label(labels.get(self.current).map(String::as_str)) == typed {
++            return true;
++        }
+         let t = typed.trim();
+         let page = labels
+             .iter()
+@@ -1124,7 +1139,6 @@ impl DocView {
+         let page = page.min(self.page_count.saturating_sub(1));
+         self.goto = Some((page, 0.0));
+         self.current = page;
+-        self.page_input = (page + 1).to_string();
+         true
+     }
+ 
+@@ -2989,9 +3003,6 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
+         }
+         if view.continuous {
+             view.current = current;
+-            if !ui.memory(|m| m.has_focus(egui::Id::new("page-input"))) {
+-                view.page_input = (current + 1).to_string();
+-            }
+         }
+         resp.context_menu(|ui| {
+             // Preparing a form: the selected field's menu.
+diff --git a/crates/ui-egui/src/chrome.rs b/crates/ui-egui/src/chrome.rs
+index 1f2d2371..0d538443 100644
+--- a/crates/ui-egui/src/chrome.rs
++++ b/crates/ui-egui/src/chrome.rs
+@@ -595,8 +595,13 @@ pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+                     view.step_page(false);
+                 }
+                 ui.label(egui::RichText::new(page_count.to_string()).font(theme::regular(11.0)).color(t.text_muted));
++                let page_input_id = view.page_input_id();
++                // Navigation updates the idle display, never the text being edited.
++                if !ui.memory(|m| m.has_focus(page_input_id)) {
++                    view.page_input = view.current_page_label(labels.get(view.current).map(String::as_str));
++                }
+                 let edit = egui::TextEdit::singleline(&mut view.page_input)
+-                    .id(egui::Id::new("page-input"))
++                    .id(page_input_id)
+                     .desired_width(34.0)
+                     .horizontal_align(Align::Center)
+                     .font(theme::medium(12.0))
+@@ -608,12 +613,13 @@ pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+                     .show(ui, |ui| ui.add(edit))
+                     .inner
+                     .on_hover_text(tl!("Current page — type a page number or label (such as iv) and press Enter"));
+-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+-                    // A page label first (logical page numbers, as Acrobat), then a number.
+-                    let typed = view.page_input.clone();
+-                    if !view.go_to_typed(&typed, &labels) {
+-                        view.page_input = (view.current + 1).to_string();
++                if r.lost_focus() {
++                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
++                        // A page label first (logical page numbers, as Acrobat), then a number.
++                        let typed = view.page_input.clone();
++                        view.go_to_typed(&typed, &labels);
+                     }
++                    view.page_input = view.current_page_label(labels.get(view.current).map(String::as_str));
+                 }
+             });
+             if let Some(id) = page_display {
+diff --git a/crates/ui-egui/src/commands.rs b/crates/ui-egui/src/commands.rs
+index 2266cb30..88b9f03d 100644
+--- a/crates/ui-egui/src/commands.rs
++++ b/crates/ui-egui/src/commands.rs
+@@ -214,9 +214,15 @@ impl PdfCraftApp {
+                 }
+             }
+             "view.focus_page_input" => {
+-                if let (Some(ctx), Some(view)) = (self.ctx.clone(), active.and_then(|i| self.views.get(i))) {
+-                    // The page box in the toolbar (chrome.rs); select its number so typing replaces it.
+-                    let id = egui::Id::new("page-input");
++                if let (Some(ctx), Some(view)) = (self.ctx.clone(), active.and_then(|i| self.views.get_mut(i))) {
++                    // The page box in the toolbar (chrome.rs); select its label so typing replaces it.
++                    let id = view.page_input_id();
++                    if !ctx.memory(|m| m.has_focus(id))
++                        && let Some(doc) = self.session.get(view.id)
++                    {
++                        // Navigation and this command can arrive before the next rail frame.
++                        view.page_input = view.current_page_label(doc.info.pages.get(view.current).map(|p| p.label.as_str()));
++                    }
+                     ctx.memory_mut(|m| m.request_focus(id));
+                     let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+                     let len = view.page_input.chars().count();
+diff --git a/crates/ui-egui/tests/viewer.rs b/crates/ui-egui/tests/viewer.rs
+index 35a82c59..76971ab8 100644
+--- a/crates/ui-egui/tests/viewer.rs
++++ b/crates/ui-egui/tests/viewer.rs
+@@ -302,6 +302,337 @@ fn layouts_fit_height_labels_and_system_theme() {
+     assert_eq!(h.state().theme_preference, pdfcraft_ui_egui::theme::ThemePreference::System);
+ }
+ 
++fn page_input_focused(h: &Harness<'static, PdfCraftApp>) -> bool {
++    let focused = h.ctx.memory(|m| m.focused());
++    let view = &h.state().views[h.state().active.unwrap()];
++    // Also identifies the original editor when running this test-only patch on the baseline.
++    focused == Some(egui::Id::new(("page-input", view.id.0))) || focused == Some(egui::Id::new("page-input"))
++}
++
++/// Exercise the real navigation editor, including its focus and Enter handling.
++fn focus_page_input(h: &mut Harness<'static, PdfCraftApp>) {
++    let text = h.state().views[h.state().active.unwrap()].page_input.clone();
++    h.query_all_by_value(&text).next().expect("page input").focus();
++    h.run_steps(1);
++    assert!(page_input_focused(h), "the actual page editor has focus");
++}
++
++fn type_page_input(h: &mut Harness<'static, PdfCraftApp>, text: &str) {
++    focus_page_input(h);
++    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
++    h.run_steps(1);
++    let old = h.state().views[h.state().active.unwrap()].page_input.clone();
++    h.query_all_by_value(&old).next().expect("page input").type_text(text);
++    h.run_steps(2);
++}
++
++fn restart_page_labels(h: &mut Harness<'static, PdfCraftApp>) {
++    use pdfcraft_engine::{Edit, LabelStyle};
++    let session = std::mem::take(&mut h.state_mut().session);
++    h.state_mut().session = session.with_clock(|| 1_700_000_000);
++    h.state_mut().active = Some(0);
++    for (from, to, style, first) in [(0, 1, LabelStyle::LowerRoman, 1), (2, 4, LabelStyle::Decimal, 1)] {
++        h.state_mut().apply_edit(Edit::NumberPages { from, to, style, prefix: String::new(), first });
++    }
++    h.run_steps(3);
++}
++
++#[test]
++fn page_label_input_keeps_current_page_when_submitted_unchanged() {
++    let mut h = harness();
++    restart_page_labels(&mut h);
++    // Physical page 3 has logical label 1. The old editor showed 3, then interpreted it as
++    // logical label 3 (physical page 5) when Enter was pressed without changing anything.
++    h.state_mut().views[0].go_to_page(2);
++    h.run_steps(3);
++    focus_page_input(&mut h);
++    h.key_press(egui::Key::Enter);
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].current, 2, "unchanged Enter must stay on the current physical page");
++
++    let id = h.state().views[0].id;
++    let before = h.state().session.get(id).unwrap();
++    let undo = before.can_undo().map(str::to_owned);
++    let dirty = before.dirty;
++    let before_bytes = h.state().session.save_bytes(id).unwrap();
++    for (page, label) in ["i", "ii", "1", "2", "3"].into_iter().enumerate() {
++        h.state_mut().views[0].go_to_page(page);
++        h.run_steps(3);
++        assert_eq!(h.state().views[0].page_input, label);
++        focus_page_input(&mut h);
++        h.key_press(egui::Key::Enter);
++        h.run_steps(3);
++        assert_eq!(h.state().views[0].current, page, "{label}");
++        assert_eq!(h.state().views[0].page_input, label);
++    }
++    let after = h.state().session.get(id).unwrap();
++    assert_eq!(after.can_undo().map(str::to_owned), undo);
++    assert_eq!(after.dirty, dirty, "navigation does not edit the PDF");
++    assert_eq!(h.state().session.save_bytes(id).unwrap(), before_bytes, "navigation preserves saved PDF bytes");
++    let mut empty = pdfcraft_ui_egui::canvas::DocView::new(pdfcraft_engine::DocId(0), &Default::default(), Default::default());
++    assert!(!empty.go_to_typed("1", &[]), "an empty view has no current page to retain");
++}
++
++#[test]
++fn page_label_input_resolves_labels_numbers_and_restores_invalid_input() {
++    use pdfcraft_engine::{Edit, LabelStyle};
++    let mut h = harness();
++    restart_page_labels(&mut h);
++    h.state_mut().apply_edit(Edit::NumberPages { from: 4, to: 4, style: LabelStyle::Decimal, prefix: "A-".into(), first: 8 });
++    h.run_steps(3);
++    for (typed, page, displayed) in [("ii", 1, "ii"), ("2", 3, "2"), ("A-8", 4, "A-8"), ("3", 2, "1"), ("missing", 2, "1")] {
++        type_page_input(&mut h, typed);
++        h.key_press(egui::Key::Enter);
++        h.run_steps(3);
++        assert_eq!(h.state().views[0].current, page, "{typed}");
++        assert_eq!(h.state().views[0].page_input, displayed, "{typed}");
++    }
++    // Scripted page selection remains physical and one-based even when a numeric label differs.
++    h.state_mut().set_option("page", "2").unwrap();
++    h.run_steps(3);
++    assert_eq!((h.state().views[0].current, h.state().views[0].page_input.as_str()), (1, "ii"));
++
++    h.state_mut().apply_edit(Edit::NumberPages { from: 0, to: 1, style: LabelStyle::None, prefix: "Appendix".into(), first: 1 });
++    h.state_mut().views[0].go_to_page(1);
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].page_input, "Appendix");
++    focus_page_input(&mut h);
++    h.key_press(egui::Key::Enter);
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].current, 1, "a duplicate current label must not resolve to its first occurrence");
++    h.state_mut().views[0].go_to_page(2);
++    h.run_steps(3);
++    type_page_input(&mut h, "Appendix");
++    h.key_press(egui::Key::Enter);
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].current, 0, "a changed label keeps the existing first-match lookup");
++
++    for (style, prefix, label) in [(LabelStyle::Decimal, " ", " 1"), (LabelStyle::None, "1 ", "1 ")] {
++        h.state_mut().apply_edit(Edit::NumberPages { from: 0, to: 0, style, prefix: prefix.into(), first: 1 });
++        h.state_mut().views[0].go_to_page(0);
++        h.run_steps(3);
++        assert_eq!(h.state().views[0].page_input, label);
++        focus_page_input(&mut h);
++        h.key_press(egui::Key::Enter);
++        h.run_steps(3);
++        assert_eq!(h.state().views[0].current, 0, "unchanged spaces in {label:?} belong to the label");
++        type_page_input(&mut h, "1");
++        h.key_press(egui::Key::Enter);
++        h.run_steps(3);
++        assert_eq!(h.state().views[0].current, 2, "changed input keeps the existing trimmed label lookup");
++    }
++    h.state_mut().views[0].go_to_page(0);
++    h.state_mut().apply_edit(Edit::NumberPages { from: 0, to: 0, style: LabelStyle::None, prefix: String::new(), first: 1 });
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].page_input, "1", "an empty label falls back to the physical number");
++    focus_page_input(&mut h);
++    h.key_press(egui::Key::Enter);
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].current, 0, "the current fallback number must not jump to another page labelled 1");
++}
++
++#[test]
++fn page_label_input_focus_command_refreshes_same_frame_navigation_and_preserves_a_draft() {
++    let mut h = harness();
++    restart_page_labels(&mut h);
++    assert_eq!(h.state().views[0].page_input, "i");
++    // No frame between navigation and the real command: it must not focus the old label.
++    h.state_mut().set_option("page", "3").unwrap();
++    assert!(h.state_mut().execute("view.focus_page_input"));
++    h.run_steps(3);
++    assert!(page_input_focused(&h));
++    assert_eq!(h.state().views[0].page_input, "1");
++    h.key_press(egui::Key::Enter);
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].current, 2, "the focus command selects the new current label");
++
++    type_page_input(&mut h, "draft");
++    h.state_mut().set_option("page", "4").unwrap();
++    assert!(h.state_mut().execute("view.focus_page_input"));
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].current, 3);
++    assert_eq!(h.state().views[0].page_input, "draft", "re-focusing keeps text already being edited");
++}
++
++#[test]
++fn page_label_input_new_document_does_not_inherit_or_commit_the_previous_draft() {
++    use pdfcraft_engine::{Edit, LabelStyle, Session};
++    let mut h = harness();
++    restart_page_labels(&mut h);
++    h.state_mut().views[0].go_to_page(3);
++    h.run_steps(3);
++    type_page_input(&mut h, "ii");
++    let original_id = h.state().views[0].id;
++    let original_bytes = h.state().session.save_bytes(original_id).unwrap();
++
++    let mut source = Session::new().with_clock(|| 1_700_000_000);
++    let source_id = source.open("new-labels.pdf", None, std::sync::Arc::new(fixture(5)), None).unwrap();
++    for (from, to, style) in [(0, 1, LabelStyle::LowerRoman), (2, 4, LabelStyle::Decimal)] {
++        source.apply(source_id, Edit::NumberPages { from, to, style, prefix: String::new(), first: 1 }).unwrap();
++    }
++    h.state_mut().open_bytes("new-labels.pdf", None, source.save_bytes(source_id).unwrap().as_ref().clone()).unwrap();
++    // Enter arriving with the switch must not submit the previous editor into this document.
++    h.key_press(egui::Key::Enter);
++    h.run_steps(3);
++    let next = h.state().active.unwrap();
++    assert_ne!(h.state().views[next].id, original_id);
++    assert_eq!((h.state().views[next].current, h.state().views[next].page_input.as_str()), (0, "i"));
++    assert!(!page_input_focused(&h), "the new document's editor starts idle");
++    assert_eq!((h.state().views[0].current, h.state().views[0].page_input.as_str()), (3, "ii"), "the hidden valid draft is not committed");
++    focus_page_input(&mut h);
++    h.key_press(egui::Key::Enter);
++    h.run_steps(3);
++    assert_eq!(h.state().views[next].current, 0, "unchanged Enter stays on the new document's first page");
++
++    h.get_by_label("a.pdf").click();
++    h.run_steps(3);
++    assert_eq!(h.state().active, Some(0));
++    assert_eq!((h.state().views[0].current, h.state().views[0].page_input.as_str()), (3, "2"));
++    assert_eq!(h.state().session.save_bytes(original_id).unwrap(), original_bytes, "tab switching never edits the original PDF");
++}
++
++#[test]
++fn page_label_input_preserves_typing_and_refreshes_after_navigation_and_tab_changes() {
++    let mut h = harness();
++    restart_page_labels(&mut h);
++    h.state_mut().views[0].go_to_page(0);
++    h.run_steps(3);
++    type_page_input(&mut h, "draft");
++    h.state_mut().views[0].go_to_page(3);
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].page_input, "draft", "paging must not overwrite the focused editor");
++    let editor_id = h.ctx.memory(|m| m.focused()).expect("focused page editor");
++    h.ctx.memory_mut(|m| m.surrender_focus(editor_id));
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].page_input, "2", "an idle editor follows the current page");
++
++    type_page_input(&mut h, "unsent");
++    h.get_by_label("b.pdf").click();
++    h.run_steps(3);
++    assert_eq!(h.state().active, Some(1));
++    assert_eq!(h.state().views[0].page_input, "unsent", "switching tabs keeps the hidden document's draft");
++    assert_eq!(h.state().views[1].page_input, "1", "the new document displays its own label");
++    h.state_mut().set_option("page", "2").unwrap();
++    h.run_steps(3);
++    focus_page_input(&mut h);
++    h.key_press(egui::Key::Enter);
++    h.run_steps(3);
++    assert_eq!((h.state().views[1].current, h.state().views[1].page_input.as_str()), (1, "2"), "default labels still work");
++    h.get_by_label("a.pdf").click();
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].page_input, "2", "returning to a document refreshes its idle label");
++
++    assert!(h.state_mut().views[0].view_history(false));
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].page_input, "i", "history navigation refreshes the label");
++}
++
++#[test]
++fn page_label_input_same_document_replacement_refreshes_the_focused_label() {
++    use pdfcraft_engine::{Edit, LabelStyle, Session};
++    use std::sync::Arc;
++    for (pages, roman, page, label) in [(5, false, 3, "4"), (5, true, 3, "iv"), (3, false, 2, "3")] {
++        let mut h = harness();
++        h.state_mut().active = Some(0);
++        h.state_mut().views[0].go_to_page(3);
++        h.run_steps(3);
++        assert_eq!((h.state().views[0].current, h.state().views[0].page_input.as_str()), (3, "4"));
++        focus_page_input(&mut h);
++        let editor_id = h.ctx.memory(|m| m.focused()).expect("focused page editor");
++        let id = h.state().views[0].id;
++        let before = h.state().session.get(id).unwrap();
++        assert!(!before.dirty);
++        assert_eq!((before.can_undo(), before.can_redo()), (None, None));
++
++        let replacement = if roman {
++            let mut source = Session::new().with_clock(|| 1_700_000_000);
++            let source_id = source.open("replacement.pdf", None, Arc::new(fixture(pages)), None).unwrap();
++            source
++                .apply(source_id, Edit::NumberPages { from: 0, to: pages - 1, style: LabelStyle::LowerRoman, prefix: String::new(), first: 1 })
++                .unwrap();
++            source.save_bytes(source_id).unwrap()
++        } else {
++            Arc::new(fixture(pages))
++        };
++        // The file watcher uses this same reload/replacement path without changing DocId.
++        let app = h.state_mut();
++        app.session.reload(id, replacement.clone()).unwrap();
++        let doc = app.session.get(id).unwrap();
++        app.views[0].document_replaced(&doc.info);
++        h.run_steps(3);
++        assert_eq!(h.state().views[0].id, id);
++        assert_eq!(h.ctx.memory(|m| m.focused()), Some(editor_id), "reload retains the actual editor's focus");
++        assert!(page_input_focused(&h));
++        assert_eq!((h.state().views[0].current, h.state().views[0].page_input.as_str()), (page, label), "replacement labels and page-count clamping");
++        h.key_press(egui::Key::Enter);
++        h.run_steps(3);
++        assert_eq!(
++            (h.state().views[0].current, h.state().views[0].page_input.as_str()),
++            (page, label),
++            "unchanged Enter retains the replacement's physical page"
++        );
++        assert_eq!(h.state().views[0].id, id);
++        let after = h.state().session.get(id).unwrap();
++        assert!(!after.dirty, "navigation does not edit the replacement");
++        assert_eq!((after.can_undo(), after.can_redo()), (None, None));
++        assert_eq!(h.state().session.save_bytes(id).unwrap(), replacement, "navigation preserves replacement PDF bytes");
++    }
++}
++
++#[test]
++fn page_label_input_same_document_replacement_keeps_full_label_selected_for_typing() {
++    use pdfcraft_engine::{Edit, LabelStyle, Session};
++    use std::sync::Arc;
++    let mut h = harness();
++    h.state_mut().active = Some(0);
++    h.state_mut().views[0].go_to_page(3);
++    h.run_steps(3);
++    assert_eq!((h.state().views[0].current, h.state().views[0].page_input.as_str()), (3, "4"));
++    assert!(h.state_mut().execute("view.focus_page_input"));
++    h.run_steps(3);
++    assert!(page_input_focused(&h), "the real focus command focuses the page editor");
++    let editor_id = h.ctx.memory(|m| m.focused()).expect("focused page editor");
++    let range = egui::TextEdit::load_state(&h.ctx, editor_id).unwrap().cursor.char_range().unwrap();
++    let ends = [range.primary.index, range.secondary.index];
++    assert!(ends.contains(&egui::text::CCursor::new(0).index), "the old label selection starts at zero");
++    assert!(ends.contains(&egui::text::CCursor::new(1).index), "the entire old one-character label is selected");
++    let id = h.state().views[0].id;
++    let original = h.state().session.get(id).unwrap();
++    assert!(!original.dirty);
++    assert_eq!((original.can_undo(), original.can_redo()), (None, None));
++
++    let mut source = Session::new().with_clock(|| 1_700_000_000);
++    let source_id = source.open("replacement.pdf", None, Arc::new(fixture(5)), None).unwrap();
++    source
++        .apply(source_id, Edit::NumberPages { from: 0, to: 4, style: LabelStyle::LowerRoman, prefix: String::new(), first: 1 })
++        .unwrap();
++    let replacement = source.save_bytes(source_id).unwrap();
++    let app = h.state_mut();
++    app.session.reload(id, replacement.clone()).unwrap();
++    let doc = app.session.get(id).unwrap();
++    app.views[0].document_replaced(&doc.info);
++    h.run_steps(3);
++    assert_eq!(h.state().views[0].id, id);
++    assert_eq!(h.ctx.memory(|m| m.focused()), Some(editor_id), "same-DocId reload retains the actual focused editor");
++    assert!(page_input_focused(&h));
++    assert_eq!((h.state().views[0].current, h.state().views[0].page_input.as_str()), (3, "iv"));
++
++    // Ordinary typing must replace the whole refreshed label without another focus or select-all.
++    h.event(egui::Event::Text("2".into()));
++    h.run_steps(2);
++    assert!(page_input_focused(&h));
++    assert_eq!(h.state().views[0].current, 3, "typing has not submitted navigation yet");
++    assert_eq!(h.state().views[0].page_input, "2", "typing replaces the entire replacement label");
++    h.key_press(egui::Key::Enter);
++    h.run_steps(3);
++    assert_eq!((h.state().views[0].current, h.state().views[0].page_input.as_str()), (1, "ii"), "Enter goes to physical page two");
++    assert_eq!(h.state().views[0].id, id);
++    let after = h.state().session.get(id).unwrap();
++    assert!(!after.dirty, "navigation does not edit the replacement PDF");
++    assert_eq!((after.can_undo(), after.can_redo()), (None, None));
++    assert_eq!(h.state().session.save_bytes(id).unwrap(), replacement, "typing and navigation preserve replacement PDF bytes");
++}
++
+ #[test]
+ fn two_page_view_steps_a_spread_at_a_time() {
+     // #70: ⌘→ went to the right-hand page of the same spread, so the view never moved.
+diff --git a/docs/roadmap.md b/docs/roadmap.md
+index 9c6d39c9..8455c449 100644
+--- a/docs/roadmap.md
++++ b/docs/roadmap.md
+@@ -84,7 +84,7 @@ total matches the parity estimate.
+ | M2 | Model, render, text | 200–350 | 15% | 130–230 | hayro bootstrap renderer (vendored patches); inspector predictor scratch is bounded by available input, and JPX sample rescaling handles 1–32 bits safely. Text extraction reaches word-F1 0.98 against pdftotext. Short same-line redraws split before placement rather than interleaving. Missing: model crate, fonts, DisplayList, renderer independent of hayro. Inspector page-label traversal and output are resource-bounded, with physical-number fallback warnings |
+ | M3 | Viewer app (native + web) | 80–150 | 90% | 10–20 | Acrobat-style shell, find, select, panels, tiles, web build, UI control channel for agents (opt-in). Missing: 60 fps test on a 500-page document, snapshot tests of every panel<br>Done since: fit visible, document title in the window; Linux middle-button scrolling; shared three-state theme preferences in the toolbar, View menu and control channel; numeric Linux portal events and idle wakeups completing #881, with native appearance inheritance retained (#446); late browser startup downloads preserve the current document and Save target (#171). |
+ | M4 | Engine, history, save, organize | 100–180 | 95% | 8–15 | Done:<br>- command registry (menus, shortcuts and palette all use it);<br>- undo/redo; incremental, atomic and encrypted saves;<br>- autosave and crash recovery;<br>- organize, combine, extract, split and insert-from-file, with identical fonts and images stored once;<br>- CLI `edit/combine/extract/split`.<br>Done since: Organize opens directly into the page overview, with checkbox selection, an editable page-range selection (#1092), and per-page rotate/delete controls; Combine files in its own tab (sortable, resizable columns; folders; early warnings; unlocking protected files), bookmark editing, page labels (Number pages), CLI `run`, Set Page Boxes, Crop tool, Duplicate pages, Ctrl+A / Cmd+A to select all pages in Organize, Replace pages, bookmarks from tagged headings. Missing: page transitions, recovery on the web |
+-| M3 | Viewer app (native + web) | 80–150 | 90% | 10–20 | Acrobat-style shell, find, select, panels, tiles, web build, UI control channel for agents (opt-in). Missing: 60 fps test on a 500-page document, snapshot tests of every panel<br>Done since: fit visible, document title in the window; Linux middle-button scrolling; shared three-state theme preferences in the toolbar, View menu and control channel; numeric Linux portal events and idle wakeups completing #881, with native appearance inheritance retained (#446); late browser startup downloads preserve the current document and Save target (#171). Renderer-creation errors return to the existing OpenGL startup fallback; a real-GPU regression covers errors and device reuse. The underlying x86 DX12 shader compiler failure remains unresolved; see `windows-renderer-startup.md`. With Windows' Animation effects turned off, the wheel scrolls and zooms without easing and egui's animations take no time (`motion.rs`; macOS, Linux and the browser aren't asked yet); Preferences ▸ Animation effects (Use system setting, On, Off) decides it on every platform. |
++| M3 | Viewer app (native + web) | 80–150 | 90% | 10–20 | Acrobat-style shell, find, select, panels, tiles, web build, UI control channel for agents (opt-in). Missing: 60 fps test on a 500-page document, snapshot tests of every panel<br>Done since: fit visible, document title in the window; Linux middle-button scrolling; shared three-state theme preferences in the toolbar, View menu and control channel; numeric Linux portal events and idle wakeups completing #881, with native appearance inheritance retained (#446); late browser startup downloads preserve the current document and Save target (#171). Renderer-creation errors return to the existing OpenGL startup fallback; a real-GPU regression covers errors and device reuse. The underlying x86 DX12 shader compiler failure remains unresolved; see `windows-renderer-startup.md`. With Windows' Animation effects turned off, the wheel scrolls and zooms without easing and egui's animations take no time (`motion.rs`; macOS, Linux and the browser aren't asked yet); Preferences ▸ Animation effects (Use system setting, On, Off) decides it on every platform. Candidate: logical page-label navigation, unchanged-input and focused same-document replacement regressions prepared; validation pending. |
+ | M4 | Engine, history, save, organize | 100–180 | 95% | 8–15 | Done:<br>- command registry (menus, shortcuts and palette all use it);<br>- undo/redo; incremental, atomic and encrypted saves;<br>- autosave and crash recovery;<br>- organize, combine, extract, split and insert-from-file, with identical fonts and images stored once;<br>- CLI `edit/combine/extract/split`.<br>Done since: Combine files in its own tab (sortable, resizable columns; folders; early warnings; unlocking protected files), bookmark editing, page labels (Number pages), CLI `run`, Set Page Boxes, Crop tool, Duplicate pages, Ctrl+A / Cmd+A to select all pages in Organize, Replace pages, bookmarks from tagged headings. Missing: page transitions, recovery on the web |
+ | M5 | Comments (all annotation types, XFDF) | 120–200 | 88% | 12–25 | Done: notes, highlight/underline/strikeout/squiggly, text boxes, ink, lines, arrows, rectangles, ovals, stamps (dynamic, Sign Here, Standard Business), with appearance streams; replies, status, checkmarks, locking, move/resize/restyle/delete; properties dialog; panel filter and sort; hide all; summaries (comments only); XFDF/FDF import and export (partial imports preserve existing reply and review-status links); flatten; Fill & Sign with adjustable text/date size; agent tools.<br>Done since: polygons, connected lines, clouds, callouts, inserted text, colour and checkmark filters; image signature pointer previews, selection handles and live image movement/resizing with proportional corners and independent edge handles. Missing: custom stamps, replace-text proposals, summary layouts with the page |
+ | M6 | Forms + JavaScript | 160–320 | 50% | 40–75 | Done: filling all field types with regenerated appearances; Prepare a form (every field type, multi-select/shared properties, move/resize/delete, Field Properties General/Appearance/Position/Options/Format/Validate/Calculate); Acrobat's AF format/keystroke/validate/calculate functions and simplified field notation run natively in Acrobat's event order; tab order; push-button actions; flatten; agent tools. Form data exchange (FDF, XFDF, XML, CSV, text) done.<br>Done since: JavaScript engine (boa, sandboxed) running custom keystroke/validate/calculate/format and button scripts, document JavaScripts, console. Missing: Actions tab, wider object model (annotations, layers, dialogs), XFA |

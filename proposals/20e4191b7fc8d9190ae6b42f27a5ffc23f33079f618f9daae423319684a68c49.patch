@@ -1,0 +1,176 @@
+diff --git a/crates/edit/src/tests.rs b/crates/edit/src/tests.rs
+index d8c9155..ab1772c 100644
+--- a/crates/edit/src/tests.rs
++++ b/crates/edit/src/tests.rs
+@@ -1399,3 +1399,171 @@ fn picture_marks_preserve_subpoint_user_unit_placement_after_save() {
+         }
+     }
+ }
++
++// Reconstruct original writer metadata/paint at unit 1, then give the page its physical scale.
++fn legacy_added_dimension_fixture(unit: f64) -> Document {
++    let mut doc = fixture();
++    let rect = [0.3, 5.0, 40.3, 20.0];
++    add_content(&mut doc, 2, &Content::Text(AddedText { rect, text: "xs".into(), ..AddedText::default() })).unwrap();
++    let mut image = Dict::new();
++    image.set(b"Subtype".to_vec(), Object::name("Image"));
++    image.set(b"Width".to_vec(), Object::Int(1));
++    image.set(b"Height".to_vec(), Object::Int(1));
++    image.set(b"ColorSpace".to_vec(), Object::name("DeviceGray"));
++    image.set(b"BitsPerComponent".to_vec(), Object::Int(8));
++    let image = doc.add(Object::Stream(Stream::from_raw(image, vec![128])));
++    add_content(&mut doc, 2, &Content::Image(AddedImage::new(rect, image))).unwrap();
++    for item in list_added(&doc) {
++        let Object::Stream(mut stream) = (*doc.get(item.obj)).clone() else { panic!("added stream") };
++        let mut metadata = stream.dict.get(b"PCAdded").unwrap().as_dict().unwrap().clone();
++        metadata.remove(b"UserUnit");
++        stream.dict.set(b"PCAdded".to_vec(), Object::Dict(metadata));
++        doc.set(item.obj, Object::Stream(stream));
++    }
++    let page = pdfcraft_model::pages(&doc)[2].obj;
++    doc.update_dict(page, |d| d.set(b"UserUnit".to_vec(), Object::Real(unit))).unwrap();
++    reopen(&doc)
++}
++
++fn assert_added_dimension_paint(doc: &Document, index: usize, expected: &Content) {
++    let item = &list_added(doc)[index];
++    let object = doc.get(item.obj);
++    let Object::Stream(stream) = &*object else { panic!("added stream") };
++    let bytes = stream.decoded().unwrap();
++    let parsed = pdfcraft_content::parse(&bytes);
++    assert_eq!(parsed.skipped, 0);
++    let unit = pdfcraft_model::pages(doc)[2].user_unit(doc);
++    let matrix = parsed.ops.iter().find(|op| op.is("cm")).unwrap().nums::<6>().unwrap();
++    let close = |actual: f64, expected: f64| {
++        assert!((actual - expected).abs() <= expected.abs().max(1e-12) * 1e-12, "{actual} != {expected}");
++    };
++    // These fixtures are upright; composing page UserUnit and the saved outer matrix restores
++    // physical display coordinates, even when individual PDF operands are far below .001.
++    let scale = unit * matrix[0];
++    match expected {
++        Content::Text(t) => {
++            let tm = parsed.ops.iter().find(|op| op.is("Tm")).unwrap().nums::<6>().unwrap();
++            let font = parsed.ops.iter().find(|op| op.is("Tf")).unwrap().num(1).unwrap();
++            close(scale * font, t.size);
++            close(scale * tm[4], t.rect[0]);
++            close(scale * tm[5], t.rect[3] - 0.95 * t.size);
++            assert!(String::from_utf8(bytes).unwrap().contains(&format!("({}) Tj", t.text)));
++        }
++        Content::Image(i) => {
++            let clip = parsed.ops.iter().find(|op| op.is("re")).unwrap().nums::<4>().unwrap();
++            for (actual, expected) in clip.into_iter().zip([i.rect[0], i.rect[1], i.rect[2] - i.rect[0], i.rect[3] - i.rect[1]]) {
++                close(scale * actual, expected);
++            }
++            let inner = parsed.ops.iter().filter(|op| op.is("cm")).nth(1).unwrap().nums::<6>().unwrap();
++            close(scale * inner[0], (i.rect[2] - i.rect[0]) * if i.flip_h { -1.0 } else { 1.0 });
++            close(scale * inner[3], i.rect[3] - i.rect[1]);
++            close(scale * inner[4], if i.flip_h { i.rect[2] } else { i.rect[0] });
++            close(scale * inner[5], i.rect[1]);
++        }
++    }
++}
++
++fn check_legacy_added_text_dimensions(unit: f64) {
++    let mut doc = legacy_added_dimension_fixture(unit);
++    let Content::Text(mut text) = list_added(&doc)[0].content.clone() else { panic!("text") };
++    let original = text.clone();
++    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
++    text.text = "sx".into(); // Same glyph advances: this edit preserves wrapping and height.
++    update_content(&mut doc, 2, 0, &Content::Text(text.clone())).unwrap();
++    doc = reopen(&doc);
++    let Content::Text(saved) = list_added(&doc)[0].content.clone() else { panic!("text") };
++    assert_eq!((saved.text.as_str(), saved.size), (text.text.as_str(), text.size));
++    for (actual, expected) in saved.rect.into_iter().zip(text.rect) {
++        assert!((actual - expected).abs() <= expected.abs() * 1e-12);
++    }
++    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
++    let obj = doc.get(list_added(&doc)[0].obj);
++    assert!(obj.as_dict().unwrap().get(b"PCAdded").unwrap().as_dict().unwrap().contains(b"UserUnit"));
++    let scale = pdfcraft_model::pages(&doc)[2].user_unit(&doc);
++    for (coordinate, delta) in text.rect.iter_mut().zip([7.3, 4.7, 7.3, 4.7]) {
++        *coordinate += delta * scale;
++    }
++    if unit == 0.01 {
++        assert_ne!(text.rect[2] - text.rect[0], original.rect[2] - original.rect[0], "ordinary translation changes subtraction rounding");
++    }
++    update_content(&mut doc, 2, 0, &Content::Text(text)).unwrap();
++    doc = reopen(&doc);
++    let Content::Text(mut text) = list_added(&doc)[0].content.clone() else { panic!("text") };
++    assert_eq!(text.size, original.size);
++    assert_added_dimension_paint(&doc, 0, &Content::Text(text.clone()));
++    text.text = "xs".into();
++    update_content(&mut doc, 2, 0, &Content::Text(text.clone())).unwrap();
++    assert_added_dimension_paint(&reopen(&doc), 0, &Content::Text(text));
++}
++
++fn check_legacy_added_image_dimensions(unit: f64) {
++    let mut doc = legacy_added_dimension_fixture(unit);
++    let Content::Image(mut image) = list_added(&doc)[1].content.clone() else { panic!("image") };
++    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
++    image.flip_h = true;
++    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
++    doc = reopen(&doc);
++    assert_eq!(list_added(&doc)[1].content, Content::Image(image.clone()));
++    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
++    let scale = pdfcraft_model::pages(&doc)[2].user_unit(&doc);
++    for (coordinate, delta) in image.rect.iter_mut().zip([7.3, 4.7, 7.3, 4.7]) {
++        *coordinate += delta * scale;
++    }
++    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
++    doc = reopen(&doc);
++    assert_added_dimension_paint(&doc, 1, &Content::Image(image.clone()));
++    image.flip_h = false;
++    update_content(&mut doc, 2, 1, &Content::Image(image.clone())).unwrap();
++    assert_added_dimension_paint(&reopen(&doc), 1, &Content::Image(image));
++}
++
++#[test]
++fn legacy_added_dimension_updates_large_text() {
++    check_legacy_added_text_dimensions(100.0);
++}
++
++#[test]
++fn legacy_added_dimension_updates_small_text() {
++    check_legacy_added_text_dimensions(0.01);
++}
++
++#[test]
++fn legacy_added_dimension_updates_tiny_paint() {
++    check_legacy_added_text_dimensions(0.000001);
++    check_legacy_added_image_dimensions(0.000001);
++}
++
++#[test]
++fn legacy_added_dimension_updates_small_images() {
++    check_legacy_added_image_dimensions(0.01);
++}
++
++#[test]
++fn legacy_added_dimension_updates_reject_new_and_resized() {
++    for unit in [0.01, 100.0] {
++        let mut doc = legacy_added_dimension_fixture(unit);
++        let before = streams(&doc, 2);
++        let Content::Text(text) = list_added(&doc)[0].content.clone() else { panic!("text") };
++        assert!(add_content(&mut doc, 2, &Content::Text(text.clone())).is_err(), "new text keeps authoring size limits");
++        for size in [text.size * 2.0, 0.0, -1.0, f64::NAN, f64::INFINITY] {
++            assert!(update_content(&mut doc, 2, 0, &Content::Text(AddedText { size, ..text.clone() })).is_err());
++        }
++        if unit < 1.0 {
++            let Content::Image(image) = list_added(&doc)[1].content.clone() else { panic!("image") };
++            assert!(add_content(&mut doc, 2, &Content::Image(image.clone())).is_err(), "new image keeps authoring extent limits");
++            for width in [(text.rect[2] - text.rect[0]) / 2.0, 0.0, f64::NAN, f64::INFINITY] {
++                let mut resized = text.clone();
++                resized.rect[2] = resized.rect[0] + width;
++                assert!(update_content(&mut doc, 2, 0, &Content::Text(resized)).is_err(), "changed text width remains bounded");
++            }
++            for axis in [0, 1] {
++                for extent in [(image.rect[axis + 2] - image.rect[axis]) / 2.0, 0.0, f64::NAN, f64::INFINITY] {
++                    let mut resized = image.clone();
++                    resized.rect[axis + 2] = resized.rect[axis] + extent;
++                    assert!(update_content(&mut doc, 2, 1, &Content::Image(resized)).is_err(), "changed image extent remains bounded");
++                }
++            }
++        }
++        assert_eq!(streams(&doc, 2), before, "refused edits leave existing content intact");
++    }
++}
