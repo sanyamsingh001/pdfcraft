@@ -1,0 +1,610 @@
+//! Multi-document page operations: Combine Files, Insert Pages from File, Extract Pages, Split.
+//!
+//! Files are picked asynchronously and used on a later frame: desktop builds through `pickers`
+//! (a blocking picker crashes the app on macOS), browsers through `requests`.
+
+use std::sync::{Arc, PoisonError};
+
+use pdfcraft_engine::{DocId, Edit, SplitBy};
+
+use crate::PdfCraftApp;
+
+/// Why files were picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilePurpose {
+    Combine,
+    InsertPages,
+    ReplacePages,
+    /// Scan & OCR ▸ Recognize text in multiple files.
+    Ocr,
+}
+
+/// The Replace Pages dialog: the chosen file and the ranges (1-based, inclusive).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplaceDraft {
+    pub name: String,
+    pub bytes: Arc<Vec<u8>>,
+    pub src_pages: usize,
+    pub from: usize,
+    pub to: usize,
+    pub src_from: usize,
+    pub(crate) target: DocId,
+    pub(crate) generation: u64,
+}
+
+/// A file operation captured before its asynchronous picker or read begins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileRequest {
+    pub(crate) purpose: FilePurpose,
+    target: Option<FileTarget>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileTarget {
+    id: DocId,
+    generation: u64,
+    /// The insertion boundary chosen when the operation began.
+    at: usize,
+    from: usize,
+    to: usize,
+}
+
+impl FileRequest {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn target_doc(self) -> Option<DocId> {
+        self.target.map(|t| t.id)
+    }
+}
+
+/// Finished asynchronous reads, carrying their initiating operation.
+pub type Requests = Arc<std::sync::Mutex<Vec<(FileRequest, Vec<(String, Vec<u8>)>)>>>;
+
+/// Settings for the Split dialog.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplitDraft {
+    /// Pages per file.
+    pub every: usize,
+    pub mode: SplitMode,
+    /// The largest part, in megabytes (File size mode).
+    pub size_mb: f64,
+}
+
+impl Default for SplitDraft {
+    fn default() -> Self {
+        SplitDraft { every: 1, mode: SplitMode::Pages, size_mb: 2.0 }
+    }
+}
+
+/// Acrobat's Split by: number of pages, file size, top-level bookmarks (and PdfCraft's
+/// before-selected-pages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitMode {
+    Pages,
+    Selection,
+    Size,
+    Bookmarks,
+}
+
+/// What Split does once confirmed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SplitPlan {
+    By(SplitBy),
+    Size(usize),
+    Bookmarks,
+}
+
+/// Organize ▸ Extract options.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExtractDraft {
+    /// Each page as its own file.
+    pub separate: bool,
+    /// Delete the pages after extracting them.
+    pub delete: bool,
+}
+
+/// Pages ▸ Rotate Pages.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RotateDraft {
+    /// Degrees clockwise: 90, 180 or 270.
+    pub degrees: i64,
+    /// 0 all pages, 1 the selection, 2 the range below.
+    pub which: u8,
+    pub from: usize,
+    pub to: usize,
+    pub parity: pdfcraft_engine::PageParity,
+    pub orientation: pdfcraft_engine::PageOrientation,
+}
+
+impl Default for RotateDraft {
+    fn default() -> Self {
+        RotateDraft { degrees: 90, which: 0, from: 1, to: 1, parity: Default::default(), orientation: Default::default() }
+    }
+}
+
+impl PdfCraftApp {
+    /// Ask for files to combine (File ▸ Combine files…).
+    pub fn combine_dialog(&mut self) {
+        self.pick_files(FilePurpose::Combine, true);
+    }
+
+    /// Scan & OCR ▸ Recognize text ▸ In multiple files: ask for the PDFs.
+    pub fn ocr_files_dialog(&mut self) {
+        self.pick_files(FilePurpose::Ocr, true);
+    }
+
+    /// Ask for a PDF whose pages to insert after the selection (Organize ▸ Insert from file).
+    pub fn insert_from_file_dialog(&mut self) {
+        if self.active.is_none() {
+            self.notify_tr("Open a document first");
+            return;
+        }
+        self.pick_files(FilePurpose::InsertPages, false);
+    }
+
+    /// Capture the destination before waiting for a picker (also used by automation/tests).
+    pub fn file_request(&self, purpose: FilePurpose) -> Option<FileRequest> {
+        let target = match purpose {
+            FilePurpose::InsertPages | FilePurpose::ReplacePages => {
+                let (i, id) = self.active_ids()?;
+                let doc = self.session.get(id)?;
+                let pages = self.views.get(i)?.target_pages();
+                let from = pages.first().copied().unwrap_or(0).checked_add(1)?;
+                let to = pages.last().copied().unwrap_or(0).checked_add(1)?;
+                let at = match pages.last() {
+                    Some(p) => p.checked_add(1)?,
+                    None => 0,
+                };
+                Some(FileTarget { id, generation: doc.edit_generation(), at, from, to })
+            }
+            _ => None,
+        };
+        Some(FileRequest { purpose, target })
+    }
+
+    fn pick_files(&mut self, purpose: FilePurpose, multiple: bool) {
+        let Some(request) = self.file_request(purpose) else { return };
+        #[cfg(not(target_arch = "wasm32"))]
+        self.pick(crate::pickers::PickFor::Files(request), rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]), multiple);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let requests = self.requests.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let dialog = rfd::AsyncFileDialog::new().add_filter("PDF", &["pdf"]);
+                let handles = if multiple { dialog.pick_files().await.unwrap_or_default() } else { dialog.pick_file().await.into_iter().collect() };
+                let mut files = Vec::new();
+                for h in handles {
+                    files.push((h.file_name(), h.read().await));
+                }
+                if !files.is_empty() {
+                    requests.lock().unwrap_or_else(PoisonError::into_inner).push((request, files));
+                }
+            });
+        }
+    }
+
+    /// Read the picked files and use them.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn use_paths(&mut self, request: FileRequest, paths: &[std::path::PathBuf]) {
+        let mut files = Vec::new();
+        for p in paths {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file.pdf".into());
+            match std::fs::read(p) {
+                Ok(b) => files.push((name, b)),
+                Err(e) => {
+                    self.notify_fmt("Couldn't read {name}: {e}", &[("name", &name), ("e", &e.to_string())]);
+                    return;
+                }
+            }
+        }
+        if !files.is_empty() {
+            self.use_file_request(request, files);
+        }
+    }
+
+    /// Handle files picked asynchronously.
+    pub(crate) fn process_file_requests(&mut self) {
+        let pending = std::mem::take(&mut *self.requests.lock().unwrap_or_else(PoisonError::into_inner));
+        for (request, files) in pending {
+            self.use_file_request(request, files);
+        }
+    }
+
+    /// Use picked files (also the entry point for tests and automation).
+    pub fn use_files(&mut self, purpose: FilePurpose, files: Vec<(String, Vec<u8>)>) {
+        let Some(request) = self.file_request(purpose) else { return };
+        self.use_file_request(request, files);
+    }
+
+    /// Complete an operation only if its original document is still active and unchanged.
+    pub fn use_file_request(&mut self, request: FileRequest, files: Vec<(String, Vec<u8>)>) {
+        if let Some(target) = request.target {
+            let valid = self.active_ids().map(|(_, id)| id) == Some(target.id)
+                && self.session.get(target.id).is_some_and(|d| d.edit_generation() == target.generation && target.at <= d.info.pages.len());
+            if !valid {
+                self.notify_tr("The document changed while you were choosing a file, so nothing was added.");
+                return;
+            }
+        }
+        match request.purpose {
+            FilePurpose::Combine => self.stage_combine(files),
+            FilePurpose::InsertPages => {
+                for (name, bytes) in files {
+                    if let Some(target) = request.target {
+                        self.apply_edit(Edit::InsertPagesFrom { name, bytes: Arc::new(bytes), pages: None, at: target.at });
+                    }
+                }
+            }
+            FilePurpose::ReplacePages => {
+                if let Some((name, bytes)) = files.into_iter().next() {
+                    if let Some(target) = request.target {
+                        self.start_replace_at(name, bytes, target);
+                    }
+                }
+            }
+            FilePurpose::Ocr => self.ocr_files(files),
+        }
+    }
+
+    pub fn replace_pages_dialog(&mut self) {
+        if self.active.is_none() {
+            self.notify_tr("Open a document first");
+            return;
+        }
+        self.pick_files(FilePurpose::ReplacePages, false);
+    }
+
+    /// Open the Replace Pages dialog for `bytes`, replacing the selection (or the current page).
+    pub fn start_replace(&mut self, name: String, bytes: Vec<u8>) {
+        let Some(request) = self.file_request(FilePurpose::ReplacePages) else { return };
+        if let Some(target) = request.target {
+            self.start_replace_at(name, bytes, target);
+        }
+    }
+
+    fn start_replace_at(&mut self, name: String, bytes: Vec<u8>, target: FileTarget) {
+        let bytes = Arc::new(bytes);
+        let src_pages = match self.session.page_count_of(&name, &bytes) {
+            Ok(n) => n,
+            Err(e) => {
+                self.notify_fmt("Couldn't use {name}: {e}", &[("name", &name), ("e", &e.to_string())]);
+                return;
+            }
+        };
+        self.replace_draft = Some(ReplaceDraft {
+            name,
+            bytes,
+            src_pages,
+            from: target.from,
+            to: target.to,
+            src_from: 1,
+            target: target.id,
+            generation: target.generation,
+        });
+        self.dialog = Some(crate::Dialog::ReplacePages);
+    }
+
+    /// Insert all pages of a PDF after the organize selection (or the current page).
+    pub fn insert_pages_from(&mut self, name: &str, bytes: Vec<u8>) {
+        self.use_files(FilePurpose::InsertPages, vec![(name.to_string(), bytes)]);
+    }
+
+    /// Copy the selected pages (or the current page) into a new unsaved document tab.
+    pub fn extract_selection(&mut self) {
+        let Some((i, id)) = self.active_ids() else { return };
+        let pages = self.views[i].target_pages();
+        let stem = self.session.get(id).map(|d| strip_pdf(&d.name).to_string()).unwrap_or_default();
+        let opts = self.extract_draft.clone();
+        if opts.separate {
+            // Each page as its own file, in a chosen folder.
+            let mut named = Vec::new();
+            for &p in &pages {
+                match self.session.extract(id, &[p]) {
+                    Ok(bytes) => named.push((format!("{stem} (page {}).pdf", p + 1), bytes)),
+                    Err(e) => {
+                        self.notify_fmt("Couldn't extract pages: {e}", &[("e", &e.to_string())]);
+                        return;
+                    }
+                }
+            }
+            if self.write_files(&named, tl!("Choose a folder for the extracted pages")) == 0 {
+                return;
+            }
+        } else {
+            match self.session.extract(id, &pages) {
+                Ok(bytes) => {
+                    let message = if pages.len() == 1 {
+                        tl!("Extracted 1 page").to_string()
+                    } else {
+                        crate::i18n::fmt(tl!("Extracted {n} pages"), &[("n", &pages.len().to_string())])
+                    };
+                    self.open_created(&format!("{stem} (extract).pdf"), bytes, &message)
+                }
+                Err(e) => {
+                    self.notify_fmt("Couldn't extract pages: {e}", &[("e", &e.to_string())]);
+                    return;
+                }
+            }
+        }
+        if opts.delete {
+            // Back on the original document.
+            self.active = Some(i);
+            self.apply_edit(pdfcraft_engine::Edit::DeletePages { pages });
+        }
+    }
+
+    /// Write named files into a chosen folder (desktop) or as downloads (web). Returns how many.
+    pub(crate) fn write_files(&mut self, named: &[(String, Arc<Vec<u8>>)], title: &str) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let dir = match &self.export_dir_override {
+                Some(d) => Some(std::path::PathBuf::from(d)),
+                None => rfd::FileDialog::new().set_title(title).pick_folder(),
+            };
+            let Some(dir) = dir else { return 0 };
+            for (name, bytes) in named {
+                if let Err(e) = crate::editing::write_atomically(&dir.join(name).to_string_lossy(), bytes) {
+                    self.notify_fmt("Couldn't write {name}: {e}", &[("name", name), ("e", &e.to_string())]);
+                    return 0;
+                }
+            }
+            if named.len() == 1 {
+                self.notify_fmt("Wrote 1 file to {dir}", &[("dir", &dir.display().to_string())]);
+            } else {
+                self.notify_fmt("Wrote {n} files to {dir}", &[("n", &named.len().to_string()), ("dir", &dir.display().to_string())]);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = title;
+            for (name, bytes) in named {
+                if let Err(e) = crate::editing::download(name, bytes) {
+                    self.notify_fmt("Couldn't download {name}: {e}", &[("name", name), ("e", &e.to_string())]);
+                    return 0;
+                }
+            }
+        }
+        named.len()
+    }
+
+    /// Pages ▸ Rotate Pages with the dialog's range and filters.
+    pub fn rotate_with_draft(&mut self) {
+        let Some((i, id)) = self.active_ids() else { return };
+        let Some(doc) = self.session.get(id) else { return };
+        let n = doc.info.pages.len();
+        let d = self.rotate_draft.clone();
+        let base: Vec<usize> = match d.which {
+            1 => self.views[i].target_pages(),
+            2 => (d.from.max(1) - 1..d.to.min(n)).collect(),
+            _ => (0..n).collect(),
+        };
+        let pages = pdfcraft_engine::filter_pages(&doc.info, &base, d.parity, d.orientation);
+        if pages.is_empty() {
+            self.notify_tr("No pages match those choices");
+            return;
+        }
+        self.apply_edit(pdfcraft_engine::Edit::RotatePages { pages, degrees: d.degrees });
+    }
+
+    /// Split the active document and write the parts: into a chosen folder (desktop) or as
+    /// downloads (web). Returns the number of files written.
+    pub fn split_active(&mut self, plan: &SplitPlan) -> usize {
+        let Some((_, id)) = self.active_ids() else { return 0 };
+        let stem = self.session.get(id).map(|d| strip_pdf(&d.name).to_string()).unwrap_or_else(|| "document".into());
+        let (parts, titles) = match plan {
+            SplitPlan::By(by) => (self.session.split(id, by), Vec::new()),
+            SplitPlan::Size(max) => (self.session.split_by_size(id, *max), Vec::new()),
+            SplitPlan::Bookmarks => {
+                let marks = self.session.bookmark_splits(id);
+                let cuts: Vec<usize> = marks.iter().map(|m| m.0).collect();
+                (self.session.split(id, &SplitBy::Before(cuts)), marks)
+            }
+        };
+        let parts = match parts {
+            Ok(p) => p,
+            Err(e) => {
+                self.notify_fmt("Couldn't split: {e}", &[("e", &e.to_string())]);
+                return 0;
+            }
+        };
+        let safe = |t: &str| t.chars().map(|c| if c.is_alphanumeric() || " -_.,()".contains(c) { c } else { '_' }).collect::<String>();
+        let named: Vec<(String, Arc<Vec<u8>>)> = parts
+            .into_iter()
+            .map(|(a, b, bytes)| {
+                // Bookmark splits are named after the bookmark that starts the part.
+                let title = titles.iter().find(|(p, _)| *p + 1 == a).map(|(_, t)| safe(t));
+                let name = match title {
+                    Some(t) => format!("{stem} - {t}.pdf"),
+                    None if a == b => format!("{stem} (page {a}).pdf"),
+                    None => format!("{stem} (pages {a}-{b}).pdf"),
+                };
+                (name, bytes)
+            })
+            .collect();
+        self.write_files(&named, "Choose a folder for the split files")
+    }
+
+    /// Summarize Comments: make the summary and open it as a new document.
+    pub fn summarize_comments(&mut self) {
+        let Some((_, id)) = self.active_ids() else { return };
+        let stem =
+            self.session.get(id).map(|d| std::path::Path::new(&d.name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+        match self.session.summarize_comments(id, self.summary_sort) {
+            Ok(bytes) => self.open_created(&format!("Summary of comments on {}.pdf", stem.unwrap_or_default()), bytes, "Created a comment summary"),
+            Err(e) => self.notify_fmt("Couldn't summarize comments: {e}", &[("e", &e.to_string())]),
+        }
+    }
+
+    pub(crate) fn open_created(&mut self, name: &str, bytes: Arc<Vec<u8>>, message: &str) {
+        match self.session.open_new(name, bytes) {
+            Ok(id) => {
+                let Some(doc) = self.session.get(id) else { return };
+                self.views.push(crate::DocView::new(id, &doc.info));
+                self.active = Some(self.views.len() - 1);
+                self.notify_tr(message);
+            }
+            Err(e) => self.notify_fmt("Couldn't open the result: {e}", &[("e", &e.to_string())]),
+        }
+    }
+}
+
+pub(crate) fn strip_pdf(name: &str) -> &str {
+    name.strip_suffix(".pdf").or_else(|| name.strip_suffix(".PDF")).unwrap_or(name)
+}
+
+impl PdfCraftApp {
+    /// Comments ▸ Import comments / Prepare a form ▸ Import data: XFDF, FDF, XML, CSV or text.
+    pub fn import_data_dialog(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let picked = match self.save_override.clone() {
+                Some(p) if [".xfdf", ".fdf", ".xml", ".csv", ".txt"].iter().any(|e| p.ends_with(e)) => Some(std::path::PathBuf::from(p)),
+                Some(_) => None,
+                None => rfd::FileDialog::new()
+                    .add_filter(tl!("Comment and form data").to_string(), &["xfdf", "fdf", "xml", "csv", "txt"])
+                    .set_title(tl!("Import data").to_string())
+                    .pick_file(),
+            };
+            let Some(path) = picked else { return };
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.apply_edit(pdfcraft_engine::Edit::ImportData { name, bytes: std::sync::Arc::new(bytes) });
+                }
+                Err(e) => self.notify_fmt("Couldn't read {name}: {e}", &[("name", &path.display().to_string()), ("e", &e.to_string())]),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.notify_tr("Importing data arrives on the web with file pickers for data files");
+    }
+
+    /// Export all comments / form data: the format follows the file name's extension.
+    /// Export a PDF ▸ Word, HTML or RTF: ask where (`save_override` in tests), then write.
+    pub fn export_office_dialog(&mut self, format: pdfcraft_engine::compare::OfficeFormat) {
+        let Some((_, id)) = self.active_ids() else { return };
+        let Some(doc) = self.session.get(id) else { return };
+        let stem = doc.name.trim_end_matches(".pdf").trim_end_matches(".PDF").to_string();
+        let ext = format.extension();
+        let bytes = doc.export_office(format);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = match self.save_override.clone() {
+                Some(p) => Some(std::path::PathBuf::from(p)),
+                None => rfd::FileDialog::new()
+                    .set_title(tl!("Export").to_string())
+                    .add_filter(ext.to_uppercase(), &[ext])
+                    .set_file_name(format!("{stem}.{ext}"))
+                    .save_file(),
+            };
+            let Some(path) = path else { return };
+            match crate::editing::write_atomically(&path.to_string_lossy(), &bytes) {
+                Ok(()) => self.notify_fmt("Exported to {path}", &[("path", &path.display().to_string())]),
+                Err(e) => self.notify_fmt("Couldn't write {name}: {e}", &[("name", &path.display().to_string()), ("e", &e.to_string())]),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        if let Err(e) = crate::editing::download(&format!("{stem}.{ext}"), &bytes) {
+            self.notify_error(e);
+        }
+    }
+
+    /// Forms ▸ Merge data files into spreadsheet: choose data files (FDF, XFDF or filled-in PDF
+    /// forms), then where to save the CSV.
+    pub fn merge_data_dialog(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let paths = rfd::FileDialog::new()
+                .set_title(tl!("Select data files to merge").to_string())
+                .add_filter(tl!("Form data and PDF forms").to_string(), &["fdf", "xfdf", "pdf"])
+                .pick_files()
+                .unwrap_or_default();
+            let mut files = Vec::new();
+            for p in paths {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                match std::fs::read(&p) {
+                    Ok(b) => files.push((name, b)),
+                    Err(e) => return self.notify_fmt("Couldn't read {name}: {e}", &[("name", &name), ("e", &e.to_string())]),
+                }
+            }
+            if !files.is_empty() {
+                self.merge_data_files(files);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.notify_tr("Merging data files needs the desktop app");
+    }
+
+    /// Merge the given data files and save the spreadsheet (asks where; `save_override` in tests).
+    pub fn merge_data_files(&mut self, files: Vec<(String, Vec<u8>)>) {
+        let csv = match pdfcraft_engine::merge_data_files(&files) {
+            Ok(c) => c,
+            Err(e) => return self.notify_error(e),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = match self.save_override.clone() {
+                Some(p) => Some(std::path::PathBuf::from(p)),
+                None => rfd::FileDialog::new()
+                    .set_title(tl!("Save the spreadsheet").to_string())
+                    .add_filter("CSV", &["csv"])
+                    .set_file_name("report.csv")
+                    .save_file(),
+            };
+            let Some(path) = path else { return };
+            match crate::editing::write_atomically(&path.to_string_lossy(), csv.as_bytes()) {
+                Ok(()) => {
+                    if files.len() == 1 {
+                        self.notify_fmt("Merged 1 file into {path}", &[("path", &path.display().to_string())]);
+                    } else {
+                        self.notify_fmt("Merged {n} files into {path}", &[("n", &files.len().to_string()), ("path", &path.display().to_string())]);
+                    }
+                }
+                Err(e) => self.notify_fmt("Couldn't write {name}: {e}", &[("name", &path.display().to_string()), ("e", &e.to_string())]),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = crate::editing::download("report.csv", csv.as_bytes());
+    }
+
+    pub fn export_data_dialog(&mut self, comments: bool, fields: bool) {
+        let Some((_, id)) = self.active_ids() else { return };
+        let Some(doc) = self.session.get(id) else { return };
+        let stem = doc.name.trim_end_matches(".pdf").trim_end_matches(".PDF").to_string();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = match self.save_override.clone() {
+                Some(p) => Some(std::path::PathBuf::from(p)),
+                None => {
+                    let title = if comments { tl!("Export comments") } else { tl!("Export form data") };
+                    let d = rfd::FileDialog::new().set_title(title).set_file_name(format!("{stem}.xfdf"));
+                    let d = if comments {
+                        d.add_filter("XFDF", &["xfdf"]).add_filter("FDF", &["fdf"])
+                    } else {
+                        d.add_filter("XFDF", &["xfdf"])
+                            .add_filter("FDF", &["fdf"])
+                            .add_filter("XML", &["xml"])
+                            .add_filter("CSV", &["csv"])
+                            .add_filter(tl!("Text").to_string(), &["txt"])
+                    };
+                    d.save_file()
+                }
+            };
+            let Some(path) = path else { return };
+            let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+            let format = pdfcraft_engine::DataFormat::from_extension(&ext).unwrap_or(pdfcraft_engine::DataFormat::Xfdf);
+            match self.session.export_data(id, format, comments, fields) {
+                Ok(bytes) => match crate::editing::write_atomically(&path.to_string_lossy(), &bytes) {
+                    Ok(()) => self.notify_fmt("Exported to {path}", &[("path", &path.display().to_string())]),
+                    Err(e) => self.notify_fmt("Couldn't write {name}: {e}", &[("name", &path.display().to_string()), ("e", &e.to_string())]),
+                },
+                Err(e) => self.notify_error(e),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        match self.session.export_data(id, pdfcraft_engine::DataFormat::Xfdf, comments, fields) {
+            Ok(bytes) => {
+                let _ = crate::editing::download(&format!("{stem}.xfdf"), &bytes);
+            }
+            Err(e) => self.notify_error(e),
+        }
+    }
+}
