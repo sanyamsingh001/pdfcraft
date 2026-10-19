@@ -1,0 +1,568 @@
+//! Field appearances (§12.7.4.3 and §12.5.5), execution plan M6.2.
+//!
+//! Text and choice fields are drawn from their `/DA` (font, size, colour) and the widget's `/MK`
+//! (background and border colours) and `/BS` (border width and style), inside a `/Tx BMC … EMC`
+//! marked-content block as viewers expect. Supported: single-line, multiline (wrapped), comb,
+//! password, quadding, auto font size (`0 Tf`), combo boxes and list boxes (selection shown).
+//!
+//! The `/DA` font is encoded using its actual mapping. Missing resources use Helvetica;
+//! uncovered CJK may use the licensed regular Japanese fallback. Other missing coverage
+//! returns an error so the caller can preserve the previous value and appearance.
+
+use pdfcraft_content::default_appearance::{DefaultAppearance, generated_font_alias, parse_default_appearance};
+use pdfcraft_cos::{Dict, Document, Object, Stream};
+use pdfcraft_fonts::generated::TextFonts;
+
+use crate::{Field, FieldKind, FormError, Widget, acroform, flags};
+
+/// Format a number for content streams.
+fn n(v: f64) -> String {
+    let s = format!("{:.3}", if v.abs() < 5e-4 { 0.0 } else { v });
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".into() } else { s.into() }
+}
+
+/// Format a number for content streams (up to three decimals).
+pub fn fmt(v: f64) -> String {
+    n(v)
+}
+
+/// A parsed default appearance string: font resource name, size (0 = auto) and colour operator.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Da {
+    pub font: String,
+    pub size: f64,
+    /// The parsed colour operation (`0 g`, `1 0 0 rg`, `0 0 0 1 k`).
+    pub color: String,
+}
+
+pub fn parse_da(da: &str) -> Da {
+    da_style(parse_default_appearance(da.as_bytes()).unwrap_or_default())
+}
+
+fn da_style(parsed: DefaultAppearance) -> Da {
+    let mut token = Vec::new();
+    pdfcraft_cos::serialize(&Object::Name(parsed.font.unwrap_or_else(|| b"Helv".to_vec())), &mut token);
+    let color = parsed
+        .color
+        .map(|v| {
+            let op = match v.len() {
+                1 => "g",
+                3 => "rg",
+                _ => "k",
+            };
+            let mut bytes = Vec::new();
+            for value in v {
+                pdfcraft_cos::serialize(&Object::Real(value), &mut bytes);
+                bytes.push(b' ');
+            }
+            bytes.extend_from_slice(op.as_bytes());
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+        .unwrap_or_else(|| "0 g".into());
+    Da { font: String::from_utf8_lossy(token.get(1..).unwrap_or_default()).into_owned(), size: parsed.size.unwrap_or(0.0).min(300.0), color }
+}
+
+/// Keep DA content bytes unchanged while walking widget/field inheritance.
+fn widget_da(doc: &Document, w: &Widget, f: &Field) -> Result<Vec<u8>, FormError> {
+    effective_da(doc, w.obj, f)
+}
+
+fn effective_da(doc: &Document, obj: pdfcraft_cos::ObjRef, f: &Field) -> Result<Vec<u8>, FormError> {
+    let mut current = doc.get(obj);
+    let mut seen = std::collections::HashSet::new();
+    let mut finished = false;
+    let bytes = |o: &Object| -> Result<Vec<u8>, FormError> {
+        let Some(s) = o.as_string() else { return Err(FormError::Invalid("present default appearance is not a string".into())) };
+        if s.bytes.len() > 65_536 {
+            return Err(FormError::Invalid("default appearance exceeds 65536 bytes".into()));
+        }
+        Ok(s.bytes.clone())
+    };
+    for _ in 0..256 {
+        let Some(d) = current.as_dict() else {
+            finished = true;
+            break;
+        };
+        if let Some(da) = d.get(b"DA") {
+            return bytes(&doc.resolve(da));
+        }
+        let Some(parent) = d.get(b"Parent") else {
+            finished = true;
+            break;
+        };
+        if let Some(r) = parent.as_ref()
+            && !seen.insert(r)
+        {
+            return Err(FormError::Invalid("cyclic field default appearance inheritance".into()));
+        }
+        current = doc.resolve(parent);
+    }
+    if !finished {
+        return Err(FormError::Invalid("field default appearance inheritance exceeds 256 levels".into()));
+    }
+    if let Some(da) = acroform(doc).and_then(|af| af.get(b"DA").map(|o| doc.resolve(o))) {
+        return bytes(&da);
+    }
+    if f.da.len() > 65_536 {
+        return Err(FormError::Invalid("default appearance exceeds 65536 bytes".into()));
+    }
+    Ok(f.da.as_bytes().to_vec())
+}
+
+/// A size-only edit retains the effective raw font alias and colour of this object.
+pub(crate) fn resized_da(doc: &Document, f: &Field, obj: pdfcraft_cos::ObjRef, size: f64) -> Result<Vec<u8>, FormError> {
+    if !size.is_finite() {
+        return Err(FormError::Invalid("font size must be finite".into()));
+    }
+    let parsed = parse_default_appearance(&effective_da(doc, obj, f)?).map_err(|e| FormError::Invalid(e.into()))?;
+    let mut bytes = Vec::new();
+    pdfcraft_cos::serialize(&Object::Name(parsed.font.clone().unwrap_or_else(|| b"Helv".to_vec())), &mut bytes);
+    bytes.extend(format!(" {} Tf {}", n(size.clamp(0.0, 100.0)), da_style(parsed).color).bytes());
+    Ok(bytes)
+}
+
+/// The font resource for `name` from the form's `/DR`, if it is a supported font dictionary.
+fn dr_font(doc: &Document, name: &[u8]) -> Option<Object> {
+    let af = acroform(doc)?;
+    let dr = doc.resolve(af.get(b"DR")?);
+    let fonts = doc.resolve(dr.as_dict()?.get(b"Font")?);
+    let entry = fonts.as_dict()?.get(name)?.clone();
+    let font = doc.resolve(&entry);
+    let fd = font.as_dict()?;
+    match fd.name(b"Subtype") {
+        Some(b"Type1" | b"TrueType" | b"MMType1" | b"Type0" | b"Type3") => {}
+        _ => return None,
+    }
+    // Symbolic fonts (ZapfDingbats, Symbol) can't show WinAnsi text.
+    if matches!(fd.name(b"BaseFont"), Some(b"ZapfDingbats" | b"Symbol")) {
+        return None;
+    }
+    Some(entry)
+}
+
+fn helvetica() -> Object {
+    let mut f = Dict::new();
+    f.set(b"Type".to_vec(), Object::name("Font"));
+    f.set(b"Subtype".to_vec(), Object::name("Type1"));
+    f.set(b"BaseFont".to_vec(), Object::name("Helvetica"));
+    f.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+    Object::Dict(f)
+}
+
+fn color_array(doc: &Document, mk: Option<&Dict>, key: &[u8]) -> Option<String> {
+    let a = doc.resolve(mk?.get(key)?);
+    let v: Vec<f64> = a.as_array()?.iter().filter_map(|x| doc.resolve(x).as_f64()).collect();
+    match v.as_slice() {
+        [g] => Some(format!("{} g", n(*g))),
+        [r, g, b] => Some(format!("{} {} {} rg", n(*r), n(*g), n(*b))),
+        [c, m, y, k] => Some(format!("{} {} {} {} k", n(*c), n(*m), n(*y), n(*k))),
+        _ => None,
+    }
+}
+
+fn stroke_op(fill: &str) -> String {
+    match fill.rsplit_once(' ') {
+        Some((nums, "g")) => format!("{nums} G"),
+        Some((nums, "rg")) => format!("{nums} RG"),
+        Some((nums, "k")) => format!("{nums} K"),
+        _ => "0 G".into(),
+    }
+}
+
+// BS/D has zero phase. Preserve actual resolved numbers, including fractional lengths;
+// three-decimal appearance formatting can otherwise turn a small valid dash into zero.
+fn dash_pattern(doc: &Document, object: Option<&Object>) -> Result<String, FormError> {
+    let Some(object) = object else { return Ok("[3] 0 d\n".into()) };
+    let array = doc.resolve(object);
+    let Some(array) = array.as_array().filter(|a| a.len() <= 256) else {
+        return Err(FormError::Invalid("widget dash pattern must be an array of at most 256 numbers".into()));
+    };
+    let mut values = Vec::with_capacity(array.len());
+    let mut total = 0.0;
+    for value in array {
+        let value = doc.resolve(value);
+        let Some(value) = value.as_f64().filter(|v| v.is_finite() && *v >= 0.0) else {
+            return Err(FormError::Invalid("widget dash lengths must be finite and nonnegative".into()));
+        };
+        total += value;
+        if !total.is_finite() {
+            return Err(FormError::Invalid("widget dash pattern exceeds the supported range".into()));
+        }
+        values.push(Object::Real(value));
+    }
+    if !values.is_empty() && total == 0.0 {
+        return Err(FormError::Invalid("widget dash pattern cannot contain only zeros".into()));
+    }
+    let mut bytes = Vec::new();
+    pdfcraft_cos::serialize(&Object::Array(values), &mut bytes);
+    Ok(format!("{} 0 d\n", String::from_utf8_lossy(&bytes)))
+}
+
+/// Background and border from `/MK` and `/BS`; returns (content, border width).
+pub(crate) fn frame(doc: &Document, wd: &Dict, w: f64, h: f64) -> Result<(String, f64), FormError> {
+    let mk = wd.get(b"MK").map(|m| doc.resolve(m)).and_then(|m| m.as_dict().cloned());
+    let mut c = String::new();
+    if let Some(bg) = color_array(doc, mk.as_ref(), b"BG") {
+        c.push_str(&format!("{bg}\n0 0 {} {} re f\n", n(w), n(h)));
+    }
+    let bs = wd.get(b"BS").map(|b| doc.resolve(b)).and_then(|b| b.as_dict().cloned());
+    let bw = bs.as_ref().and_then(|b| b.get(b"W")).and_then(|x| doc.resolve(x).as_f64()).unwrap_or(1.0).max(0.0);
+    if let Some(bc) = color_array(doc, mk.as_ref(), b"BC")
+        && bw > 0.0
+    {
+        let style = match bs.as_ref().and_then(|b| b.get(b"S")) {
+            Some(o) => doc.resolve(o).as_name().ok_or_else(|| FormError::Invalid("widget border style must be a name".into()))?.to_vec(),
+            None => Vec::new(),
+        };
+        if style == b"U" {
+            // Underline: only the bottom edge.
+            c.push_str(&format!("{}\n{} w\n[] 0 d\n0 {} m {} {} l S\n", stroke_op(&bc), n(bw), n(bw / 2.0), n(w), n(bw / 2.0)));
+            return Ok((c, bw));
+        }
+        if !matches!(style.as_slice(), b"" | b"S" | b"D" | b"B" | b"I") {
+            return Err(FormError::Invalid("widget border style cannot be preserved".into()));
+        }
+        let dash = if style == b"D" { dash_pattern(doc, bs.as_ref().and_then(|b| b.get(b"D")))? } else { "[] 0 d\n".into() };
+        c.push_str(&format!("{}\n{} w\n{}{} {} {} {} re S\n[] 0 d\n", stroke_op(&bc), n(bw), dash, n(bw / 2.0), n(bw / 2.0), n(w - bw), n(h - bw)));
+        if style == b"B" || style == b"I" {
+            // Beveled: a light top-left and a darker bottom-right inside the border; inset:
+            // grey top-left and light grey bottom-right.
+            let (tl, br) = if style == b"B" { ("1 g", "0.5 g") } else { ("0.5 g", "0.75 g") };
+            let (x0, y0, x1, y1) = (bw, bw, w - bw, h - bw);
+            let k = bw;
+            c.push_str(&format!(
+                "{tl}\n{} {} m {} {} l {} {} l {} {} l {} {} l {} {} l f\n{br}\n{} {} m {} {} l {} {} l {} {} l {} {} l {} {} l f\n",
+                n(x0),
+                n(y0),
+                n(x0),
+                n(y1),
+                n(x1),
+                n(y1),
+                n(x1 - k),
+                n(y1 - k),
+                n(x0 + k),
+                n(y1 - k),
+                n(x0 + k),
+                n(y0 + k),
+                n(x1),
+                n(y1),
+                n(x1),
+                n(y0),
+                n(x0),
+                n(y0),
+                n(x0 + k),
+                n(y0 + k),
+                n(x1 - k),
+                n(y0 + k),
+                n(x1 - k),
+                n(y1 - k)
+            ));
+            return Ok((c, 2.0 * bw));
+        }
+        return Ok((c, bw));
+    }
+    Ok((c, 0.0))
+}
+
+/// Validate the effective imported styling before an author edit can replace its DA.
+pub(crate) fn validate_field_da(doc: &Document, f: &Field) -> Result<(), FormError> {
+    for w in &f.widgets {
+        parse_default_appearance(&widget_da(doc, w, f)?).map_err(|e| FormError::Invalid(e.into()))?;
+    }
+    Ok(())
+}
+
+/// The appearance of a text or choice field's widget showing `values`.
+pub fn field_appearance(doc: &mut Document, f: &Field, w: &Widget, values: &[String]) -> Result<Stream, FormError> {
+    field_appearance_as(doc, f, w, values, true)
+}
+
+/// [`field_appearance`], where `format` false means `values` are already what to show (a
+/// custom Format script ran).
+pub fn field_appearance_as(doc: &mut Document, f: &Field, w: &Widget, values: &[String], format: bool) -> Result<Stream, FormError> {
+    let mut staged = doc.clone();
+    let result = field_appearance_as_inner(&mut staged, f, w, values, format)?;
+    *doc = staged;
+    Ok(result)
+}
+
+fn field_appearance_as_inner(doc: &mut Document, f: &Field, w: &Widget, values: &[String], format: bool) -> Result<Stream, FormError> {
+    // The Format event: what is shown, not what is stored.
+    let formatted: Vec<String>;
+    let values = if format
+        && matches!(f.kind, crate::FieldKind::Text | crate::FieldKind::Combo)
+        && values.len() == 1
+        && f.actions.format != crate::af::Format::None
+    {
+        formatted = vec![crate::af::format_value(&f.actions.format, &values[0])];
+        &formatted[..]
+    } else {
+        values
+    };
+    let wobj = doc.get(w.obj);
+    let wd = wobj.as_dict().cloned().unwrap_or_default();
+    let (width, height) = ((w.rect[2] - w.rect[0]).max(1.0), (w.rect[3] - w.rect[1]).max(1.0));
+    let parsed = parse_default_appearance(&widget_da(doc, w, f)?).map_err(|e| FormError::Invalid(e.into()))?;
+    let raw_font = parsed.font.clone().unwrap_or_else(|| b"Helv".to_vec());
+    let da = da_style(parsed);
+    let (font_name, font_obj) = match dr_font(doc, &raw_font) {
+        Some(o) => (generated_font_alias(&raw_font), o),
+        None => ("Helv".to_string(), helvetica()),
+    };
+    let text: String = if f.kind == FieldKind::Combo {
+        values.iter().map(|v| f.options.iter().find(|(e, _)| e == v).map_or(v.clone(), |(_, d)| d.clone())).collect::<Vec<_>>().join(", ")
+    } else {
+        values.first().cloned().unwrap_or_default()
+    };
+    let text = if f.has(flags::PASSWORD) { "*".repeat(text.chars().count()) } else { text };
+    // Imported values can contain line breaks even in single-line fields. Keep V
+    // untouched; only their display uses one space per CRLF, CR, or LF separator.
+    // Mask passwords first so the appearance still reveals no value characters.
+    let text = if f.kind == FieldKind::Combo || (f.kind == FieldKind::Text && !f.has(flags::MULTILINE)) {
+        text.replace("\r\n", "\n").replace(['\r', '\n'], " ")
+    } else {
+        text
+    };
+    let prepared =
+        if f.kind == FieldKind::List { f.options.iter().map(|(_, display)| display.as_str()).collect::<Vec<_>>().join("\n") } else { text.clone() };
+    let fonts = TextFonts::new(doc, &font_name, font_obj, &prepared).map_err(FormError::Invalid)?;
+    let (mut c, bw) = frame(doc, &wd, width, height)?;
+    let pad = 2.0 + bw;
+    let inner_w = (width - 2.0 * pad).max(1.0);
+    let q = wd.get(b"Q").and_then(|o| doc.resolve(o).as_int()).unwrap_or(f.quadding);
+    let mut body: Vec<u8> = Vec::new();
+    let show = |body: &mut Vec<u8>, x: f64, y: f64, text: &str, size: f64| -> Result<(), FormError> {
+        body.extend(format!("1 0 0 1 {} {} Tm ", n(x), n(y)).bytes());
+        body.extend(fonts.show(text, size).map_err(FormError::Invalid)?);
+        Ok(())
+    };
+    let x_for = |text: &str, size: f64| -> f64 {
+        let tw = fonts.width(text, size);
+        match q {
+            1 => pad + (inner_w - tw) / 2.0,
+            2 => width - pad - tw,
+            _ => pad,
+        }
+    };
+    let mut size = da.size;
+    match f.kind {
+        FieldKind::List => {
+            // Every option, one per line from the top; selected ones highlighted.
+            if size == 0.0 {
+                size = 12.0;
+            }
+            let line = size * 1.15;
+            let top = wd.get(b"TI").and_then(|o| doc.resolve(o).as_int()).unwrap_or(0).max(0) as usize;
+            let mut y = height - pad;
+            for (export, display) in f.options.iter().skip(top) {
+                if y - line < 0.0 {
+                    break;
+                }
+                if values.contains(export) {
+                    c.push_str(&format!("0.6 0.75 0.86 rg\n{} {} {} {} re f\n", n(bw), n(y - line), n(width - 2.0 * bw), n(line)));
+                }
+                show(&mut body, pad, y - line + size * 0.25, display, size)?;
+                y -= line;
+            }
+        }
+        _ => {
+            let comb = f.has(flags::COMB) && !f.has(flags::MULTILINE) && !f.has(flags::PASSWORD) && f.max_len.is_some_and(|m| m > 0);
+            if f.kind == FieldKind::Text && f.has(flags::MULTILINE) {
+                if size == 0.0 {
+                    // Auto size: the largest size (≤ 12) whose wrapped lines fit the height.
+                    size = 12.0;
+                    while size > 4.0 && fonts.wrap(&text, size, inner_w).len() as f64 * size * 1.15 > height - 2.0 * pad {
+                        size -= 0.5;
+                    }
+                }
+                let mut y = height - pad - size * 0.85;
+                for line in fonts.wrap(&text, size, inner_w) {
+                    if y < -size {
+                        break;
+                    }
+                    show(&mut body, x_for(&line, size), y, &line, size)?;
+                    y -= size * 1.15;
+                }
+            } else {
+                if size == 0.0 {
+                    size = ((height - 2.0 * pad) / 1.15).clamp(4.0, 12.0);
+                    let tw = fonts.width(&text, size);
+                    if tw > inner_w && !comb {
+                        size = (size * inner_w / tw).max(4.0);
+                    }
+                }
+                // Centre Helvetica's ascent (0.718) and descent (0.207) vertically.
+                let y = (height - 0.925 * size) / 2.0 + 0.207 * size;
+                if comb {
+                    let cells = f.max_len.unwrap_or(1).max(1);
+                    let cell = width / cells as f64;
+                    for (i, ch) in text.chars().take(cells).enumerate() {
+                        let s = ch.to_string();
+                        show(&mut body, cell * i as f64 + (cell - fonts.width(&s, size)) / 2.0, y, &s, size)?;
+                    }
+                } else {
+                    show(&mut body, x_for(&text, size), y, &text, size)?;
+                }
+            }
+        }
+    }
+    let mut content = c.into_bytes();
+    content.extend(
+        format!(
+            "/Tx BMC\nq\n{} {} {} {} re W n\nBT\n/{} {} Tf\n{}\n",
+            n(bw),
+            n(bw),
+            n(width - 2.0 * bw),
+            n(height - 2.0 * bw),
+            font_name,
+            n(size),
+            da.color
+        )
+        .bytes(),
+    );
+    content.extend(body);
+    content.extend_from_slice(b"ET\nQ\nEMC\n");
+    let mut res = Dict::new();
+    res.set(b"Font".to_vec(), Object::Dict(fonts.fonts));
+    let mut d = Dict::new();
+    d.set(b"Type".to_vec(), Object::name("XObject"));
+    d.set(b"Subtype".to_vec(), Object::name("Form"));
+    d.set(b"BBox".to_vec(), Object::Array([0.0, 0.0, width, height].iter().map(|v| Object::Real(*v)).collect()));
+    d.set(b"Resources".to_vec(), Object::Dict(res));
+    Ok(Stream::flate(d, &content))
+}
+
+/// On/Off appearances for a check box or radio button that has none (a check mark or a dot,
+/// drawn as paths, so no symbol font is needed).
+/// The streams are added to `doc` as indirect objects (streams can't be direct objects).
+pub fn check_box_states(doc: &mut Document, w: &Widget, kind: FieldKind, on_name: &str) -> Result<Dict, FormError> {
+    let wobj = doc.get(w.obj);
+    let wd = wobj.as_dict().cloned().unwrap_or_default();
+    let (width, height) = ((w.rect[2] - w.rect[0]).max(1.0), (w.rect[3] - w.rect[1]).max(1.0));
+    let (frame_c, _) = frame(doc, &wd, width, height)?;
+    let style = crate::author::CheckStyle::of_widget(doc, &wd, kind);
+    let mut form = |content: String| -> Object {
+        let mut d = Dict::new();
+        d.set(b"Type".to_vec(), Object::name("XObject"));
+        d.set(b"Subtype".to_vec(), Object::name("Form"));
+        d.set(b"BBox".to_vec(), Object::Array([0.0, 0.0, width, height].iter().map(|v| Object::Real(*v)).collect()));
+        Object::Ref(doc.add(Object::Stream(Stream::flate(d, content.as_bytes()))))
+    };
+    let s = width.min(height);
+    let mark = check_mark(style, width / 2.0, height / 2.0, s);
+    let mut nd = Dict::new();
+    nd.set(on_name.as_bytes().to_vec(), form(format!("{frame_c}{mark}")));
+    nd.set(b"Off".to_vec(), form(frame_c));
+    let mut ap = Dict::new();
+    ap.set(b"N".to_vec(), Object::Dict(nd));
+    Ok(ap)
+}
+
+/// The on-state mark for `style` (#94), centred on (`cx`, `cy`) in a box whose smaller side is
+/// `s`, drawn in black.
+fn check_mark(style: crate::author::CheckStyle, cx: f64, cy: f64, s: f64) -> String {
+    use crate::author::CheckStyle;
+    // A filled polygon through `pts`.
+    let polygon = |pts: &[(f64, f64)]| {
+        let mut c = String::from("0 g\n");
+        for (i, (x, y)) in pts.iter().enumerate() {
+            c.push_str(&format!("{} {} {} ", n(*x), n(*y), if i == 0 { "m" } else { "l" }));
+        }
+        c.push_str("h f\n");
+        c
+    };
+    let line = n((s * 0.1).max(1.0));
+    match style {
+        CheckStyle::Check => format!(
+            "0 G\n{line} w 1 J 1 j\n{} {} m {} {} l {} {} l S\n",
+            n(cx - s * 0.28),
+            n(cy),
+            n(cx - s * 0.08),
+            n(cy - s * 0.22),
+            n(cx + s * 0.3),
+            n(cy + s * 0.25)
+        ),
+        CheckStyle::Cross => {
+            let d = s * 0.25;
+            format!(
+                "0 G\n{line} w 1 J\n{} {} m {} {} l S\n{} {} m {} {} l S\n",
+                n(cx - d),
+                n(cy - d),
+                n(cx + d),
+                n(cy + d),
+                n(cx - d),
+                n(cy + d),
+                n(cx + d),
+                n(cy - d)
+            )
+        }
+        CheckStyle::Square => {
+            let d = s * 0.22;
+            format!("0 g\n{} {} {} {} re f\n", n(cx - d), n(cy - d), n(2.0 * d), n(2.0 * d))
+        }
+        CheckStyle::Diamond => {
+            let d = s * 0.3;
+            polygon(&[(cx, cy + d), (cx + d, cy), (cx, cy - d), (cx - d, cy)])
+        }
+        CheckStyle::Star => {
+            // Five points: outer and inner radii alternate, the first point straight up.
+            let (outer, inner) = (s * 0.32, s * 0.32 * 0.382);
+            let pts: Vec<(f64, f64)> = (0..10)
+                .map(|i| {
+                    let a = std::f64::consts::FRAC_PI_2 + i as f64 * std::f64::consts::PI / 5.0;
+                    let r = if i % 2 == 0 { outer } else { inner };
+                    (cx + r * a.cos(), cy + r * a.sin())
+                })
+                .collect();
+            polygon(&pts)
+        }
+        CheckStyle::Circle => {
+            let r = s * 0.25;
+            let k = 0.5523 * r;
+            format!(
+                "0 g\n{} {} m {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c f\n",
+                n(cx + r),
+                n(cy),
+                n(cx + r),
+                n(cy + k),
+                n(cx + k),
+                n(cy + r),
+                n(cx),
+                n(cy + r),
+                n(cx - k),
+                n(cy + r),
+                n(cx - r),
+                n(cy + k),
+                n(cx - r),
+                n(cy),
+                n(cx - r),
+                n(cy - k),
+                n(cx - k),
+                n(cy - r),
+                n(cx),
+                n(cy - r),
+                n(cx + k),
+                n(cy - r),
+                n(cx + r),
+                n(cy - k),
+                n(cx + r),
+                n(cy)
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_appearance_strings_parse() {
+        assert_eq!(parse_da("/Helv 0 Tf 0 g"), Da { font: "Helv".into(), size: 0.0, color: "0 g".into() });
+        assert_eq!(parse_da("0.1 0.2 0.3 rg /F1 11 Tf"), Da { font: "F1".into(), size: 11.0, color: "0.1 0.2 0.3 rg".into() });
+        assert_eq!(parse_da("/Cour 9 Tf 0 0 0 1 k").color, "0 0 0 1 k");
+        assert_eq!(parse_da("garbage").font, "Helv");
+        assert_eq!(stroke_op("1 0 0 rg"), "1 0 0 RG");
+    }
+}
