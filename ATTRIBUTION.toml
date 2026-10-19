@@ -1,0 +1,133 @@
+# One entry per original historical PdfCraft screenshot. No private paths or capture code.
+
+[[asset]]
+path = "images/field-include-before.png"
+title = "Historical Reset native capture: field-include-before"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "e448fb353b151346c5414fd40b82a635417f423668f0085e66631a2dffb69df5"
+
+[[asset]]
+path = "images/field-include-after-click.png"
+title = "Historical Reset native capture: field-include-after-click"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "1a69e920b84cf0b23de169b5537ab8ce2a985b7b9b8225ad43c0f00a06be00de"
+
+[[asset]]
+path = "images/field-include-reopened.png"
+title = "Historical Reset native capture: field-include-reopened"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "691dacd6671824ee99e7211a70ced7f0249638390b3a59566fe2884cd83f21cc"
+
+[[asset]]
+path = "images/field-exclude-before.png"
+title = "Historical Reset native capture: field-exclude-before"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "87892ad6ea2d23fd826bae004240d126e864ebc46ebe5aebf4c27ad552a16847"
+
+[[asset]]
+path = "images/field-exclude-after-click.png"
+title = "Historical Reset native capture: field-exclude-after-click"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "a460cc7c6ba8eb564893599af97af510f68227476c9a51fb5e53de0952b8500a"
+
+[[asset]]
+path = "images/field-exclude-reopened.png"
+title = "Historical Reset native capture: field-exclude-reopened"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "7b9075caa0a60f7101021af100d86fab28436bc0fdb1ff60db0e165cd1700b99"
+
+[[asset]]
+path = "images/group-include-before.png"
+title = "Historical Reset native capture: group-include-before"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "a76c3bbe3e0d02e8a266ffa96947b0cd8fba019619ee2637bc47f2a478f3743f"
+
+[[asset]]
+path = "images/group-include-after-click.png"
+title = "Historical Reset native capture: group-include-after-click"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "058b701b192533b85df31b12708d1ea9469bc5556457d63c3ca786d1309aa96e"
+
+[[asset]]
+path = "images/group-include-reopened.png"
+title = "Historical Reset native capture: group-include-reopened"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "019c9b4a64f8a17f21212e291ae32b8422511d91a6a1810327fc993149af4bc9"
+
+[[asset]]
+path = "images/group-exclude-before.png"
+title = "Historical Reset native capture: group-exclude-before"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "fbf5cfcf6692028c338b56a8e74d22ac6db3453bed09cfc37e77e1d33379e3d5"
+
+[[asset]]
+path = "images/group-exclude-after-click.png"
+title = "Historical Reset native capture: group-exclude-after-click"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "6dfff997e7d0a74bc86da422d17939097a8da9ec6df7975c9a730ca6763561a5"
+
+[[asset]]
+path = "images/group-exclude-reopened.png"
+title = "Historical Reset native capture: group-exclude-reopened"
+author = "sanyamsingh001 (contributor-original capture with Codex automation)"
+source = "https://github.com/sanyamsingh001/pdfcraft; historical base 50f261d70c8e199600a82dbaa6912c6fbc4b4612; diff SHA256 4788e4f79f82fa04feabde2616fbf23eb9bd9168e051b22a140701512704b02a"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "image"
+usage = "Historical four-case Reset pointer/save-reopen review evidence, 1272x688; scoped limits in README.md"
+sha256 = "03de95aed1fb15aead5a74de9c37599ff9fc54df7229acc6ee82f152dbfe41de"
